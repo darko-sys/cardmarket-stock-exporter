@@ -406,19 +406,65 @@ if (gapFillOnlyEl && fastThenFillEl) {
 
 async function recoverExportSnapshot(tab) {
   try {
-    if (tab?.id) {
-      const [{ result: fromWin }] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => window.__cmExportSnapshot || null,
-      });
-      if (fromWin?.rows?.length) return fromWin;
-    }
-  } catch (e) {  }
-  try {
     const { cmExportSnapshot } = await chrome.storage.local.get('cmExportSnapshot');
     if (cmExportSnapshot?.rows?.length) return cmExportSnapshot;
   } catch (e) {  }
+  try {
+    if (tab?.id) {
+      const pulled = await pullExportRowsFromTab(tab.id);
+      if (pulled?.rows?.length) return pulled;
+    }
+  } catch (e) {  }
   return null;
+}
+
+async function injectSeedIntoTab(tabId, rows) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => { window.__cmExportSeed = []; },
+  });
+  const CHUNK = 300;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const part = rows.slice(i, i + CHUNK);
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      args: [part],
+      func: (chunk) => {
+        if (!Array.isArray(window.__cmExportSeed)) window.__cmExportSeed = [];
+        window.__cmExportSeed.push(...chunk);
+      },
+    });
+  }
+  const [{ result: n }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => (window.__cmExportSeed || []).length,
+  });
+  if (n !== rows.length) throw new Error(`Seed-Inject ${n}/${rows.length}`);
+}
+
+async function pullExportRowsFromTab(tabId) {
+  const [{ result: meta }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const rows = window.__cmExportResultRows || window.__cmExportSnapshot?.rows || [];
+      return { n: rows.length, pagesScanned: window.__cmExportSnapshot?.pagesScanned || 0 };
+    },
+  });
+  if (!meta?.n) return null;
+  const CHUNK = 300;
+  const rows = [];
+  for (let i = 0; i < meta.n; i += CHUNK) {
+    const [{ result: chunk }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      args: [i, CHUNK],
+      func: (start, size) => {
+        const all = window.__cmExportResultRows || window.__cmExportSnapshot?.rows || [];
+        return all.slice(start, start + size);
+      },
+    });
+    if (Array.isArray(chunk)) rows.push(...chunk);
+  }
+  return rows.length ? { rows, pagesScanned: meta.pagesScanned } : null;
 }
 
 async function downloadStockCsv(rows, { partialExport = false, selectedSets = null } = {}) {
@@ -501,20 +547,27 @@ async function runExport(maxPages, opts = {}) {
       ), '');
     }
 
-    await chrome.storage.local.remove('cmExportSnapshot');
-    if (seedStockRows?.length) {
-      await chrome.storage.local.set({ cmExportSeed: seedStockRows });
-    } else {
-      await chrome.storage.local.remove('cmExportSeed');
-    }
+    await chrome.storage.local.remove(['cmExportSnapshot', 'cmExportSeed', 'cmExportResult']);
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => {
         window.__cmExportProgress = null;
         window.__cmExportSnapshot = null;
+        window.__cmExportResultRows = null;
+        window.__cmExportSeed = null;
         window.__cmExportStop = false;
       },
     });
+    if (seedStockRows?.length) {
+      try {
+        log(tl('Seed wird in den Tab geladen…', 'Injecting seed into the tab…'), '');
+        await injectSeedIntoTab(tab.id, seedStockRows);
+        log(tl(`Seed im Tab: ${seedStockRows.length} Zeilen.`, `Seed in tab: ${seedStockRows.length} rows.`), 'ok');
+      } catch (e) {
+        log(tl(`Seed-Inject fehlgeschlagen: ${e.message}`, `Seed inject failed: ${e.message}`), 'err');
+        return;
+      }
+    }
 
     pollTimer = setInterval(async () => {
       try {
@@ -543,13 +596,24 @@ async function runExport(maxPages, opts = {}) {
       func: injectedScrapeAll,
     });
     let result = injected?.[0]?.result;
+    // Huge row arrays often fail to clone back from the tab — pull in chunks.
+    if (!result?.rows?.length && tab?.id) {
+      const pulled = await pullExportRowsFromTab(tab.id);
+      if (pulled?.rows?.length) result = { ...(result || {}), ...pulled };
+    }
+    if (!result?.rows?.length) {
+      try {
+        const { cmExportSnapshot } = await chrome.storage.local.get('cmExportSnapshot');
+        if (cmExportSnapshot?.rows?.length) result = { ...(result || {}), ...cmExportSnapshot };
+      } catch (e) {  }
+    }
 
     clearInterval(pollTimer); pollTimer = null;
     progFillEl.style.width = '100%';
 
     // Tab gone, Cloudflare navigation, or an uncaught throw leaves result null.
     // Recover the last snapshot so ~1500 cards are not thrown away.
-    if (!result) {
+    if (!result?.rows?.length) {
       log(tl(
         '⚠ Kein Ergebnis vom Scraper (Tab weg navigiert, Cloudflare-Block oder Absturz im Seitenkontext). Versuche Teildaten zu bergen…',
         '⚠ No result from the scraper (tab navigated away, Cloudflare block, or a crash in the page context). Trying to recover partial data…'
@@ -1219,17 +1283,20 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
 
   if (useSeed) {
     try {
-      const { cmExportSeed } = await chrome.storage.local.get('cmExportSeed');
-      if (Array.isArray(cmExportSeed)) {
+      const seedArr = Array.isArray(window.__cmExportSeed) ? window.__cmExportSeed : null;
+      if (seedArr) {
         let added = 0;
-        for (const r of cmExportSeed) {
+        for (const r of seedArr) {
           if (!r?.articleId || seen.has(r.articleId)) continue;
           seen.add(r.articleId);
           rows.push(r);
           added++;
         }
-        console.log(`[CM] Seed: ${added} ArticleIDs aus CSV übernommen (total ${rows.length})`);
+        console.log(`[CM] Seed: ${added} ArticleIDs aus Tab-Inject übernommen (total ${rows.length})`);
+      } else {
+        console.warn('[CM] useSeed gesetzt, aber window.__cmExportSeed fehlt — Gap-Fill ohne Basis');
       }
+      window.__cmExportSeed = null;
     } catch (e) {
       console.warn('[CM] Seed laden fehlgeschlagen:', e);
     }
@@ -1320,9 +1387,10 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
       ts: now,
     };
     window.__cmExportSnapshot = snap;
+    window.__cmExportResultRows = rows;
     try {
       // Survives tab navigation / Cloudflare better than window alone.
-      chrome.storage.local.set({ cmExportSnapshot: snap });
+      Promise.resolve(chrome.storage.local.set({ cmExportSnapshot: snap })).catch(() => {});
     } catch (e) {  }
   };
 
@@ -1609,6 +1677,20 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
     const overlapWithoutCount = (expected == null && primary.passDuplicateCount > 0);
     const shortOfTarget = targetCount > 0 && primary.passObserved < targetCount;
     if (countMet || (!missing && !overlapWithoutCount && !shortOfTarget)) return primary;
+
+    // With a CSV seed, pages are mostly global dups. price_desc walks them all again
+    // and adds nothing for minutes — leave leftovers to the forced gap/completeness pass.
+    if (useSeed && primary.added === 0) {
+      console.warn(`[CM] ${label}: Seed-Modus, +0 neu — price_desc übersprungen (${primary.passObserved}${targetCount ? `/${targetCount}` : ''})`);
+      writeProgress({
+        lastErr: `${expName || label}: +0 neu (Seed), sort-Retry übersprungen`,
+      });
+      return {
+        ...primary,
+        shortOfTarget: shortOfTarget || primary.shortOfTarget,
+        capSuspect: primary.capSuspect || (targetCount > 300 && shortOfTarget),
+      };
+    }
 
     recoveryStats.attempts++;
     if (expected != null) {
@@ -1915,6 +1997,16 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
                 })
               : expansions;
             console.log(`[CM] ${passLabel}: ${list.length} Set(s)${fastMode ? ' [fast]' : ' [thorough]'}`);
+            if (onlyShortfalls) {
+              const preview = list.slice(0, 15).map(e => `${e.name} ${countObsByName(e.name)}/${e.labelCount}`);
+              writeProgress({
+                status: 'gap fill',
+                page: 0,
+                lastErr: list.length
+                  ? `${list.length} Lücke(n): ${preview.join('; ')}${list.length > 15 ? '…' : ''}`
+                  : 'Keine Lücken gegenüber Menü-Counts',
+              });
+            }
             for (let i = 0; i < list.length; i++) {
               if (window.__cmExportStop || blockedByCm) break;
               const { id, name, labelCount } = list[i];
@@ -1925,6 +2017,13 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
                 expObserved[id] = already;
                 continue;
               }
+              const before = rows.length;
+              writeProgress({
+                status: passLabel.toLowerCase(),
+                expansion: { idx: i + 1, total: list.length, name, id },
+                page: 0,
+                lastErr: `${name}: ${already}/${labelCount || '?'} — nachladen`,
+              });
               const target = (!fastMode && labelCount > 0) ? labelCount : null;
               try {
                 await scrapeWithCascade(
@@ -1942,6 +2041,11 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
                 writeProgress({ lastErr: `${name}${langTag}: ${e.message}` });
               }
               expObserved[id] = countObsByName(name);
+              const gained = rows.length - before;
+              console.log(`[CM] ${passLabel} ${name}: +${gained} neu → ${expObserved[id]}/${labelCount}`);
+              writeProgress({
+                lastErr: `${name}: +${gained} neu, jetzt ${expObserved[id]}/${labelCount || '?'}`,
+              });
               if (blockedByCm) break;
               if (delay) await sleep(delay);
             }
@@ -1956,16 +2060,25 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
               writeProgress({ status: 'gap fill' + langTag, page: 0 });
               await runExpansionPass('GAP', { fastMode: false, forceCascade: false, onlyShortfalls: true });
             }
-            // Sets still short and likely over the 300-cap: one forced cascade each.
+            // Forced language split only where it helps: empty sets, tiny holes, or ~300-cap.
             if (!blockedByCm && !window.__cmExportStop) {
               const needCascade = expansions.filter(e => {
                 const want = e.labelCount;
-                if (!(want > 300)) return false;
-                return countObsByName(e.name) < want && countObsByName(e.name) >= 280;
+                if (!(want > 0)) return false;
+                const obs = countObsByName(e.name);
+                if (obs >= want) return false;
+                if (obs === 0) return true;
+                if (want - obs <= 5) return true;
+                if (want > 300 && obs >= 280) return true;
+                return false;
               });
+              if (needCascade.length) {
+                console.log(`[CM] CASCADE: ${needCascade.length} Set(s) noch kurz`);
+              }
               for (let i = 0; i < needCascade.length; i++) {
                 if (window.__cmExportStop || blockedByCm) break;
                 const { id, name, labelCount } = needCascade[i];
+                const before = rows.length;
                 writeProgress({ status: 'gap cascade', lastErr: `${name}: ${countObsByName(name)}/${labelCount} — Sprache teilen` });
                 try {
                   await scrapeWithCascade(
@@ -1980,6 +2093,7 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
                   if (e.message === 'Abgebrochen' || e.message === 'CardmarketBlock') break;
                 }
                 expObserved[id] = countObsByName(name);
+                console.log(`[CM] CASCADE ${name}: +${rows.length - before} neu → ${expObserved[id]}/${labelCount}`);
                 if (delay) await sleep(delay);
               }
             }

@@ -67,22 +67,20 @@ test('gap-fill scrape loads seed and only fetches short expansions thoroughly', 
   const window = loadPopup();
   const calls = [];
 
-  await window.chrome.storage.local.set({
-    cmExportSeed: [
-      ...Array.from({ length: 161 }, (_, i) => ({
-        articleId: String(1000 + i),
-        expansion: 'Dominaria',
-        name: `D${i}`,
-        amountDisplay: '1',
-      })),
-      {
-        articleId: '2001',
-        expansion: 'Game Day Promos',
-        name: 'Only one',
-        amountDisplay: '1',
-      },
-    ],
-  });
+  window.__cmExportSeed = [
+    ...Array.from({ length: 161 }, (_, i) => ({
+      articleId: String(1000 + i),
+      expansion: 'Dominaria',
+      name: `D${i}`,
+      amountDisplay: '1',
+    })),
+    {
+      articleId: '2001',
+      expansion: 'Game Day Promos',
+      name: 'Only one',
+      amountDisplay: '1',
+    },
+  ];
 
   function pageHtml(selectExtra, ids, maxSite) {
     const select = `<select name="idExpansion">
