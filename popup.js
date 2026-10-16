@@ -316,6 +316,57 @@ function stockExportMarkedPartial(result) {
   return !!(result && !result.aborted && result.completeness && result.completeness.missingTotal > 0);
 }
 
+async function recoverExportSnapshot(tab) {
+  try {
+    if (tab?.id) {
+      const [{ result: fromWin }] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => window.__cmExportSnapshot || null,
+      });
+      if (fromWin?.rows?.length) return fromWin;
+    }
+  } catch (e) {  }
+  try {
+    const { cmExportSnapshot } = await chrome.storage.local.get('cmExportSnapshot');
+    if (cmExportSnapshot?.rows?.length) return cmExportSnapshot;
+  } catch (e) {  }
+  return null;
+}
+
+async function downloadStockCsv(rows, { partialExport = false, selectedSets = null } = {}) {
+  const meta = {
+    exportedAt: new Date().toISOString(),
+    lang: langEl.value,
+    game: gameEl.value,
+    toolVersion: chrome.runtime.getManifest().version,
+  };
+  const csv = buildCsv(rows, meta);
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
+  const reader = new FileReader();
+  return new Promise((resolve) => {
+    reader.onload = async () => {
+      let setMarker = '';
+      if (selectedSets && selectedSets.length) {
+        if (selectedSets.length === 1) {
+          const slug = String(selectedSets[0].name || 'set').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+          setMarker = '-' + (slug || 'set');
+        } else {
+          setMarker = `-${selectedSets.length}sets`;
+        }
+      }
+      const fname = `cardmarket-stock-${new Date().toISOString().slice(0, 10)}-${meta.lang}-${meta.game}-v${meta.toolVersion}${setMarker}${partialExport ? '-TEILEXPORT' : ''}.csv`;
+      try {
+        await chrome.downloads.download({ url: reader.result, filename: fname, saveAs: true });
+        log(t('log_download', [fname]), 'ok');
+      } catch (e) {
+        log(t('log_download_error', [e.message]), 'err');
+      }
+      resolve(fname);
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
 async function runExport(maxPages, opts = {}) {
   const exportStartedAt = Date.now();
   let partialExport = false;
@@ -330,8 +381,9 @@ async function runExport(maxPages, opts = {}) {
   progFillEl.style.width = '0%';
   statusEl.innerHTML = '';
   let pollTimer = null;
+  let tab = null;
   try {
-    const tab = await getTargetTab();
+    tab = await getTargetTab();
     if (!tab || !/cardmarket\.com/.test(tab.url || '')) {
       log(t('log_no_cm_tab'), 'err');
       return;
@@ -344,9 +396,14 @@ async function runExport(maxPages, opts = {}) {
     const langFilterMsg = cardLangIds.length > 0 ? t('log_card_langs', [cardLangIds.join(',')]) : '';
     log(t('log_path_info', [basePath, useSortBy, perExpansion, delay, langFilterMsg]));
 
+    await chrome.storage.local.remove('cmExportSnapshot');
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: () => { window.__cmExportProgress = null; window.__cmExportStop = false; },
+      func: () => {
+        window.__cmExportProgress = null;
+        window.__cmExportSnapshot = null;
+        window.__cmExportStop = false;
+      },
     });
 
     pollTimer = setInterval(async () => {
@@ -369,22 +426,41 @@ async function runExport(maxPages, opts = {}) {
       args: [{ maxPages, delay, basePath, useSortBy, perExpansion, cardLangIds, selectedExpansionIds, splitParams: getSplitParams() }],
       func: injectedScrapeAll,
     });
-    const result = injected?.[0]?.result;
+    let result = injected?.[0]?.result;
 
     clearInterval(pollTimer); pollTimer = null;
     progFillEl.style.width = '100%';
 
-    // Tab gone, Cloudflare navigation, or an uncaught throw in the injected
-    // scrape leaves result null — do not read .error on it.
+    // Tab gone, Cloudflare navigation, or an uncaught throw leaves result null.
+    // Recover the last snapshot so ~1500 cards are not thrown away.
     if (!result) {
       log(tl(
-        '⚠ Kein Ergebnis vom Scraper (Tab weg navigiert, Cloudflare-Block oder Absturz im Seitenkontext). Keine neue CSV.',
-        '⚠ No result from the scraper (tab navigated away, Cloudflare block, or a crash in the page context). No new CSV.'
+        '⚠ Kein Ergebnis vom Scraper (Tab weg navigiert, Cloudflare-Block oder Absturz im Seitenkontext). Versuche Teildaten zu bergen…',
+        '⚠ No result from the scraper (tab navigated away, Cloudflare block, or a crash in the page context). Trying to recover partial data…'
       ), 'err');
-      return;
+      const snap = await recoverExportSnapshot(tab);
+      if (!snap?.rows?.length) {
+        log(tl('Keine geborgenen Zeilen — keine CSV.', 'No recoverable rows — no CSV.'), 'err');
+        return;
+      }
+      result = {
+        rows: snap.rows,
+        pagesScanned: snap.pagesScanned || 0,
+        recoveryStats: snap.recoveryStats || null,
+        scopeErrors: snap.scopeErrors || [],
+        detectedTotalPages: snap.detectedTotalPages || null,
+        completeness: null,
+        aborted: true,
+        error: 'scraper returned null; recovered snapshot',
+      };
+      partialExport = true;
+      log(tl(
+        `⚠ ${snap.rows.length} Zeile(n) aus Zwischenspeicher geborgen — TEILEXPORT.`,
+        `⚠ Recovered ${snap.rows.length} row(s) from the snapshot — partial export.`
+      ), 'err');
     }
 
-    if (result.error) {
+    if (result.error && result.error !== 'scraper returned null; recovered snapshot') {
       log(t('log_error', [result.error]), 'err');
       if (result.debugSnippet) log(result.debugSnippet.slice(0, 500));
       if (!(result.rows && result.rows.length)) return;
@@ -394,6 +470,7 @@ async function runExport(maxPages, opts = {}) {
         `⚠ Saving a partial export anyway: ${result.rows.length} rows collected before the error. Do NOT treat this as your complete stock.`
       ), 'err');
     }
+    if (result.aborted) partialExport = true;
     if (result.scopeErrors && result.scopeErrors.length) {
       partialExport = true;
       log(tl(
@@ -491,38 +568,21 @@ async function runExport(maxPages, opts = {}) {
       }
     }
 
-    const meta = {
-      exportedAt: new Date().toISOString(),
-      lang: langEl.value,
-      game: gameEl.value,
-      toolVersion: chrome.runtime.getManifest().version,
-    };
-    const csv = buildCsv(rows, meta);
-    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
-    const reader = new FileReader();
-    reader.onload = async () => {
-      let setMarker = '';
-      if (selectedSets && selectedSets.length) {
-        if (selectedSets.length === 1) {
-          const slug = String(selectedSets[0].name || 'set').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
-          setMarker = '-' + (slug || 'set');
-        } else {
-          setMarker = `-${selectedSets.length}sets`;
-        }
-      }
-      const fname = `cardmarket-stock-${new Date().toISOString().slice(0, 10)}-${meta.lang}-${meta.game}-v${meta.toolVersion}${setMarker}${partialExport ? '-TEILEXPORT' : ''}.csv`;
-      try {
-        await chrome.downloads.download({ url: reader.result, filename: fname, saveAs: true });
-        log(t('log_download', [fname]), 'ok');
-      } catch (e) {
-        log(t('log_download_error', [e.message]), 'err');
-      }
-    };
-    reader.readAsDataURL(blob);
+    await downloadStockCsv(rows, { partialExport, selectedSets });
 
   } catch (e) {
     log(t('log_exception', [e.message]), 'err');
     console.error(e);
+    try {
+      const snap = await recoverExportSnapshot(tab);
+      if (snap?.rows?.length) {
+        log(tl(
+          `⚠ Nach Exception: ${snap.rows.length} Zeile(n) geborgen — TEILEXPORT.`,
+          `⚠ After exception: recovered ${snap.rows.length} row(s) — partial export.`
+        ), 'err');
+        await downloadStockCsv(snap.rows, { partialExport: true, selectedSets });
+      }
+    } catch (e2) {  }
   } finally {
     if (pollTimer) clearInterval(pollTimer);
     btnRun.disabled = false;
@@ -1026,7 +1086,10 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
   let pagesScanned = 0;
   let debugSnippet = '';
   let detectedTotalPages = null;
+  // First 403/429 ends the whole run softly — no 5×30s retry storm, no language cascade.
+  let blockedByCm = false;
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  let tripCardmarketBlock = () => {};
 
   const parseLooseCount = (value) => {
     const digits = String(value || '').replace(/[^\d]/g, '');
@@ -1097,6 +1160,28 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
     return { res, url };
   };
 
+  let lastSnapRows = -1;
+  let lastSnapAt = 0;
+  const publishSnapshot = (force = false) => {
+    const now = Date.now();
+    if (!force && rows.length === lastSnapRows && now - lastSnapAt < 5000) return;
+    lastSnapRows = rows.length;
+    lastSnapAt = now;
+    const snap = {
+      rows,
+      pagesScanned,
+      recoveryStats,
+      scopeErrors,
+      detectedTotalPages,
+      ts: now,
+    };
+    window.__cmExportSnapshot = snap;
+    try {
+      // Survives tab navigation / Cloudflare better than window alone.
+      chrome.storage.local.set({ cmExportSnapshot: snap });
+    } catch (e) {  }
+  };
+
   const writeProgress = (extras) => {
     const stockTotal = rows.reduce((s, r) => s + (parseInt(r.amountDisplay || r.amount, 10) || 0), 0);
     window.__cmExportProgress = Object.assign(
@@ -1104,6 +1189,17 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
       { rowsTotal: rows.length, stockTotal, ts: Date.now() },
       extras,
     );
+    publishSnapshot(false);
+  };
+
+  tripCardmarketBlock = (status, url) => {
+    if (blockedByCm) return;
+    blockedByCm = true;
+    console.warn(`[CM] Cardmarket ${status} — soft-stop, keeping partial rows @ ${url}`);
+    writeProgress({
+      status: 'blocked',
+      lastErr: `${status} Cloudflare/Rate-Limit — Export gestoppt, Teildaten werden gesichert`,
+    });
   };
 
   const PAGE_SIZE = 20;
@@ -1130,7 +1226,6 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
     let sawEmptyFirst = false;
     let loops = 0;
     let httpAttempts = 0;
-    let blockStreak = 0;
 
     const uniqueNow = () => passSeen.size + anonymousObserved;
 
@@ -1192,20 +1287,14 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
         lastErr: null,
       });
 
+      if (blockedByCm) throw new Error('CardmarketBlock');
       const { res, url } = await fetchPage(page, filter, sortOverride);
       httpAttempts++;
       if (res.status === 429 || res.status === 403) {
-        blockStreak++;
-        if (blockStreak >= 5) throw new Error(`HTTP ${res.status} @ ${url} (${blockStreak}× — Abbruch dieses Bereichs)`);
-        const pause = res.status === 403 ? 30000 : 10000;
-        console.warn(`[CM] ${res.status} pause ${pause / 1000}s (${blockStreak}/5)`);
-        writeProgress({ lastErr: `${res.status} ${res.status === 403 ? 'Cloudflare/Block' : 'Rate-Limit'}, Pause ${pause / 1000}s` });
-        visited.delete(page);
-        if (isListRetry) retried.delete(page);
-        await sleep(pause);
-        continue;
+        tripCardmarketBlock(res.status, url);
+        publishSnapshot(true);
+        throw new Error('CardmarketBlock');
       }
-      blockStreak = 0;
       if (!res.ok) throw new Error(`HTTP ${res.status} @ ${url}`);
       const html = await res.text();
       const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -1353,9 +1442,16 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
   };
 
   const scrapeScope = async (filter, label, expIdx, expTotal, expName, targetCount = null) => {
+    if (blockedByCm) {
+      return {
+        added: 0, capSuspect: false, totalPagesSeen: 0, pagesFetched: 0,
+        expectedListings: null, passObserved: 0, passArticleIds: [], passDuplicateCount: 0,
+        sortLabel: 'skipped', shortOfTarget: !!(targetCount > 0), emptyFirstPage: false,
+      };
+    }
     const primary = await scrapePages(filter, label, expIdx, expTotal, expName, null, targetCount);
 
-    if (maxPages) return primary;
+    if (maxPages || blockedByCm) return primary;
 
     const countMet = targetCount > 0 && primary.passObserved >= targetCount;
     const expected = (primary.expectedListings === 0 && primary.passObserved > 0) ? null : primary.expectedListings;
@@ -1518,19 +1614,31 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
   const scrapeWithCascade = async (baseFilter, label, expIdx, expTotal, expName, force = false, targetCount = null) => {
     const seenAtStart = seen.size;
     const uniqueInScope = () => seen.size - seenAtStart;
-    const shouldStop = () => window.__cmExportStop || (targetCount > 0 && uniqueInScope() >= targetCount);
+    const shouldStop = () => (
+      blockedByCm || window.__cmExportStop || (targetCount > 0 && uniqueInScope() >= targetCount)
+    );
 
-    // Always try the plain scope first — even on forced re-scan — so a complete
-    // set never pays the full language×rarity walk while the row counter sits still.
+    if (blockedByCm) return 0;
+
+    // Plain scope first. Meeting the menu count must not start a language walk.
     const r1 = await scrapeScope(baseFilter, label, expIdx, expTotal, expName, targetCount);
     if (r1.emptyFirstPage && baseFilter.idExpansion != null) expEmptyFirst[baseFilter.idExpansion] = true;
     let totalAdded = r1.added;
     if (shouldStop()) return totalAdded;
     if (!force && !r1.capSuspect) return totalAdded;
 
+    // Normal pass: never run the 17-language cascade. That is what freezes the
+    // counter around ~550 while Cloudflare starts returning 403. Shortfalls stay
+    // for the completeness pass (or a later targeted re-export).
+    if (!force) {
+      console.warn(`[CM] ${label}: cap/gap deferred — skipping language cascade this pass`);
+      writeProgress({ lastErr: `${expName || label}: >300/Lücke — Kaskade übersprungen (schonender Lauf)` });
+      return totalAdded;
+    }
+
     if (!baseFilter.idLanguage) {
-      console.warn(`[CM] ${label} ${force ? 'forced completeness re-scan' : 'cap/gap-suspect'} — cascading by language...`);
-      writeProgress({ lastErr: `${label}: ${force ? 'completeness recovery' : 'cap/gap suspect'}, split by language` });
+      console.warn(`[CM] ${label} forced completeness re-scan — cascading by language...`);
+      writeProgress({ lastErr: `${label}: completeness recovery, split by language` });
       for (const langId of LANG_IDS) {
         if (shouldStop()) break;
         const filter = { ...baseFilter, idLanguage: langId };
@@ -1545,8 +1653,8 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
       return totalAdded;
     }
 
-    console.warn(`[CM] ${label} cap/gap-suspect bei gesetzter Sprache — teile nach Rarity/Varianten...`);
-    writeProgress({ lastErr: `${label}: cap/gap suspect, split by rarity/variant` });
+    console.warn(`[CM] ${label} completeness bei gesetzter Sprache — teile nach Rarity/Varianten...`);
+    writeProgress({ lastErr: `${label}: completeness, split by rarity/variant` });
     return totalAdded + await cascadeRarityAndVariants(baseFilter, label, expIdx, expTotal, expName, shouldStop);
   };
 
@@ -1658,12 +1766,13 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
                 labelCount > 0 ? labelCount : null,
               );
             } catch (e) {
-              if (e.message === 'Abgebrochen') break;
+              if (e.message === 'Abgebrochen' || e.message === 'CardmarketBlock') break;
               console.error(`[CM] Expansion ${id} (${name})${langTag} fehlgeschlagen:`, e);
               scopeErrors.push({ label: `${name}${langTag}`, msg: e.message });
               writeProgress({ lastErr: `${name}${langTag}: ${e.message}` });
             }
             expObserved[id] = (expObserved[id] || 0) + (rows.length - beforeLen);
+            if (blockedByCm) break;
             if (delay) await sleep(delay);
           }
         }
@@ -1671,16 +1780,17 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
         try {
           await scrapeWithCascade(langBaseFilter, 'ALL' + langTag, 1, 1, 'ALL');
         } catch (e) {
-          if (e.message !== 'Abgebrochen') {
+          if (e.message !== 'Abgebrochen' && e.message !== 'CardmarketBlock') {
             scopeErrors.push({ label: 'ALL' + langTag, msg: e.message });
             writeProgress({ lastErr: `ALL${langTag}: ${e.message}` });
           }
         }
       }
+      if (blockedByCm) break;
     }
 
     let completeness = null;
-    const canCheckCompleteness = perExpansion && !maxPages && !langFilterActive && Object.keys(expExpected).length > 0;
+    const canCheckCompleteness = perExpansion && !maxPages && !langFilterActive && !blockedByCm && Object.keys(expExpected).length > 0;
     if (canCheckCompleteness && !window.__cmExportStop) {
       const shortfalls = [];
       for (const id of Object.keys(expExpected)) {
@@ -1702,13 +1812,14 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
             want > 0 ? want : null,
           );
         } catch (e) {
-          if (e.message === 'Abgebrochen') break;
+          if (e.message === 'Abgebrochen' || e.message === 'CardmarketBlock') break;
           console.error(`[CM] completeness re-scan ${sf.id} (${sf.name}) failed:`, e);
         }
         expObserved[sf.id] = (expObserved[sf.id] || 0) + (rows.length - beforeLen);
+        if (blockedByCm) break;
         if (delay) await sleep(delay);
       }
-      if (!window.__cmExportStop) {
+      if (!window.__cmExportStop && !blockedByCm) {
         let expectedTotal = 0, observedTotal = 0, checked = 0, uncounted = 0;
         const stillShort = [];
         for (const id of Object.keys(expExpected)) {
@@ -1742,11 +1853,38 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
       }
     }
 
-    writeProgress({ status: 'done' });
-    return { rows, pagesScanned, debugSnippet, detectedTotalPages, recoveryStats, completeness, scopeErrors, aborted: !!window.__cmExportStop };
+    publishSnapshot(true);
+    writeProgress({ status: blockedByCm ? 'blocked' : 'done' });
+    return {
+      rows,
+      pagesScanned,
+      debugSnippet,
+      detectedTotalPages,
+      recoveryStats,
+      completeness,
+      scopeErrors,
+      aborted: !!window.__cmExportStop || blockedByCm,
+      error: blockedByCm ? 'Cardmarket 403/429 — Lauf gestoppt, Teildaten werden gesichert' : undefined,
+    };
   } catch (e) {
+    publishSnapshot(true);
+    if (e.message === 'CardmarketBlock') {
+      blockedByCm = true;
+      writeProgress({ status: 'blocked', lastErr: 'Cardmarket Block — Teildaten werden gesichert' });
+      return {
+        rows,
+        pagesScanned,
+        debugSnippet,
+        detectedTotalPages,
+        recoveryStats,
+        completeness: null,
+        scopeErrors,
+        aborted: true,
+        error: 'Cardmarket 403/429 — Lauf gestoppt, Teildaten werden gesichert',
+      };
+    }
     writeProgress({ status: 'error', lastErr: e.message });
-    return { error: e.message, rows, pagesScanned, debugSnippet, detectedTotalPages, recoveryStats, completeness: null, scopeErrors, aborted: !!window.__cmExportStop };
+    return { error: e.message, rows, pagesScanned, debugSnippet, detectedTotalPages, recoveryStats, completeness: null, scopeErrors, aborted: !!window.__cmExportStop || blockedByCm };
   }
 }
 
