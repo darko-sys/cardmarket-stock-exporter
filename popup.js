@@ -312,6 +312,10 @@ if (btnExportSets) btnExportSets.addEventListener('click', () => {
   runExport(0, { selectedSets });
 });
 
+function stockExportMarkedPartial(result) {
+  return !!(result && !result.aborted && result.completeness && result.completeness.missingTotal > 0);
+}
+
 async function runExport(maxPages, opts = {}) {
   const exportStartedAt = Date.now();
   let partialExport = false;
@@ -360,14 +364,25 @@ async function runExport(maxPages, opts = {}) {
       } catch (e) {  }
     }, 800);
 
-    const [{ result }] = await chrome.scripting.executeScript({
+    const injected = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       args: [{ maxPages, delay, basePath, useSortBy, perExpansion, cardLangIds, selectedExpansionIds, splitParams: getSplitParams() }],
       func: injectedScrapeAll,
     });
+    const result = injected?.[0]?.result;
 
     clearInterval(pollTimer); pollTimer = null;
     progFillEl.style.width = '100%';
+
+    // Tab gone, Cloudflare navigation, or an uncaught throw in the injected
+    // scrape leaves result null — do not read .error on it.
+    if (!result) {
+      log(tl(
+        '⚠ Kein Ergebnis vom Scraper (Tab weg navigiert, Cloudflare-Block oder Absturz im Seitenkontext). Keine neue CSV.',
+        '⚠ No result from the scraper (tab navigated away, Cloudflare block, or a crash in the page context). No new CSV.'
+      ), 'err');
+      return;
+    }
 
     if (result.error) {
       log(t('log_error', [result.error]), 'err');
@@ -380,15 +395,16 @@ async function runExport(maxPages, opts = {}) {
       ), 'err');
     }
     if (result.scopeErrors && result.scopeErrors.length) {
+      partialExport = true;
       log(tl(
         `⚠ ${result.scopeErrors.length} Bereich(e) fehlgeschlagen — der Export ist unvollständig:`,
         `⚠ ${result.scopeErrors.length} scope(s) failed — this export is incomplete:`
       ), 'err');
       result.scopeErrors.slice(0, 10).forEach(se => log(`  ${se.label}: ${se.msg}`, 'err'));
     }
-    log(t('log_pages_scanned', [result.pagesScanned]), 'ok');
+    log(t('log_pages_scanned', [result.pagesScanned || 0]), 'ok');
     if (result.detectedTotalPages) log(t('log_pagination_widget', [result.detectedTotalPages]));
-    log(t('log_rows_dedup', [result.rows.length]), 'ok');
+    log(t('log_rows_dedup', [(result.rows || []).length]), 'ok');
     if (result.recoveryStats && result.recoveryStats.attempts > 0) {
       const rs = result.recoveryStats;
       log(
@@ -413,12 +429,16 @@ async function runExport(maxPages, opts = {}) {
     }
     if (result.completeness && !result.aborted) {
       const c = result.completeness;
-      if (c.missingTotal > 0) {
+      if (stockExportMarkedPartial(result)) {
+        partialExport = true;
         log(tl(
-          `⚠ Bestands-Abgleich: ${c.observedTotal}/${c.expectedTotal} Karten exportiert — ${c.missingTotal} fehlen trotz Nachladen.`,
-          `⚠ Stock check: exported ${c.observedTotal}/${c.expectedTotal} cards — ${c.missingTotal} still missing after recovery.`
+          `⚠ Bestands-Abgleich: ${c.observedTotal}/${c.expectedTotal} Karten exportiert — ${c.missingTotal} fehlen trotz Nachladen. Die CSV gilt nicht als vollständig.`,
+          `⚠ Stock check: exported ${c.observedTotal}/${c.expectedTotal} cards — ${c.missingTotal} still missing after recovery. This CSV is not complete.`
         ), 'err');
-        c.shortfalls.slice(0, 15).forEach(s => log(`  ${s.name}: ${s.observed}/${s.expected} (${s.missing})`, 'err'));
+        c.shortfalls.forEach(s => log(tl(
+          `  ${s.name}: erwartet ${s.expected}, gesehen ${s.observed}`,
+          `  ${s.name}: expected ${s.expected}, seen ${s.observed}`
+        ), 'err'));
       } else if (c.checkedExpansions > 0) {
         log(tl(
           `✓ Bestands-Abgleich: alle ${c.expectedTotal} Karten aus ${c.checkedExpansions} Sets vollständig exportiert.`,
@@ -438,24 +458,25 @@ async function runExport(maxPages, opts = {}) {
         ), '');
       }
     }
-    const emptyAmount = result.rows.filter(r => !(r.amountDisplay || r.amount)).length;
+    const rows = Array.isArray(result.rows) ? result.rows : [];
+    const emptyAmount = rows.filter(r => !(r.amountDisplay || r.amount)).length;
     if (emptyAmount > 0) log(t('log_rows_no_amount', [emptyAmount]), 'err');
-    const emptyIdProduct = result.rows.filter(r => !r.idProduct).length;
+    const emptyIdProduct = rows.filter(r => !r.idProduct).length;
     if (emptyIdProduct > 0) {
-      const pct = (emptyIdProduct / result.rows.length * 100).toFixed(1);
+      const pct = rows.length ? (emptyIdProduct / rows.length * 100).toFixed(1) : '0.0';
       log(t('log_rows_no_idproduct', [emptyIdProduct, pct]), 'err');
-    } else {
-      log(t('log_idproduct_ok', [result.rows.length]), 'ok');
+    } else if (rows.length) {
+      log(t('log_idproduct_ok', [rows.length]), 'ok');
     }
-    const totalStock = result.rows.reduce((s, r) => s + (parseInt(r.amountDisplay || r.amount, 10) || 0), 0);
+    const totalStock = rows.reduce((s, r) => s + (parseInt(r.amountDisplay || r.amount, 10) || 0), 0);
     log(t('log_total_amounts', [totalStock]), 'ok');
-    const totalValue = result.rows.reduce((s, r) => s + (parseFloat((r.price || '').replace(/\./g, '').replace(',', '.')) || 0) * (parseInt(r.amountDisplay || r.amount, 10) || 0), 0);
+    const totalValue = rows.reduce((s, r) => s + (parseFloat((r.price || '').replace(/\./g, '').replace(',', '.')) || 0) * (parseInt(r.amountDisplay || r.amount, 10) || 0), 0);
     log(t('log_total_value', [totalValue.toFixed(2).replace('.', ',')]), 'ok');
     if (totalStock > 0) {
       showSupportResult(totalStock, totalValue, Math.max(1, Math.round((Date.now() - exportStartedAt) / 60000)));
     }
 
-    if (result.rows.length === 0) {
+    if (rows.length === 0) {
       log(t('log_no_rows'), 'err');
       if (result.debugSnippet) log(result.debugSnippet.slice(0, 800));
       return;
@@ -463,7 +484,7 @@ async function runExport(maxPages, opts = {}) {
 
     if (fetchTrendEl && fetchTrendEl.checked && !result.aborted) {
       try {
-        await attachTrends(tab, result.rows, delay);
+        await attachTrends(tab, rows, delay);
       } catch (e) {
         log(tl(`⚠ Trend-Abruf fehlgeschlagen (${e.message}) — CSV wird ohne Trendspalten geschrieben.`,
                `⚠ Trend fetch failed (${e.message}) — writing the CSV without trend columns.`), 'err');
@@ -476,7 +497,7 @@ async function runExport(maxPages, opts = {}) {
       game: gameEl.value,
       toolVersion: chrome.runtime.getManifest().version,
     };
-    const csv = buildCsv(result.rows, meta);
+    const csv = buildCsv(rows, meta);
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
     const reader = new FileReader();
     reader.onload = async () => {
@@ -819,7 +840,7 @@ async function injectedFetchTrends({ items, delay, conc, baseDone, grandTotal })
   return { guides, cfHits, failed, aborted: !!window.__cmExportStop };
 }
 
-async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpansion, cardLangIds, mode, selectedExpansionIds, splitParams }) {
+async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpansion, cardLangIds, mode, selectedExpansionIds, splitParams, retryMs = 3000 }) {
   function parseRow(el) {
     const row = {};
     let articleId = '';
@@ -1000,6 +1021,7 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
   const seen = new Set();
   const anonSeen = new Set();
   const recoveryStats = { attempts: 0, recovered: 0, unresolved: [] };
+  const expEmptyFirst = {};
   const scopeErrors = [];
   let pagesScanned = 0;
   let debugSnippet = '';
@@ -1084,23 +1106,84 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
     );
   };
 
-  const scrapePages = async (filter, label, expIdx, expTotal, expName, sortOverride = null) => {
-    let page = 1;
-    let emptyStreak = 0;
+  const PAGE_SIZE = 20;
+
+  const scrapePages = async (filter, label, expIdx, expTotal, expName, sortOverride = null, targetCount = null) => {
     let localAdded = 0;
     let totalPagesSeen = 0;
     let pagesFetched = 0;
-    let lastPageRowCount = 0;
     let expectedListings = null;
     let anonymousObserved = 0;
     const passAnonSeen = new Set();
     let passDuplicateCount = 0;
     const passSeen = new Set();
     const sortLabel = sortOverride || (useSortBy ? 'name_asc' : 'default');
+    // Closed page list. A response that only repeats ArticleIDs is not the end:
+    // Cardmarket does that on a full page while the short last page (often absent
+    // from a naive "stop on duplicates" walk) still holds listings. An expansion
+    // with a menu count is finished only when the unique ArticleIDs reach it.
+    const planned = new Set([1]);
+    const visited = new Set();
+    const zeroGain = new Set();
+    const retried = new Set();
+    const pageGain = new Map();
+    let sawEmptyFirst = false;
+    let loops = 0;
+    let httpAttempts = 0;
+    let blockStreak = 0;
+
+    const uniqueNow = () => passSeen.size + anonymousObserved;
+
+    const absorbPageLinks = (doc) => {
+      let maxP = 0;
+      doc.querySelectorAll('a[href*="site="]').forEach(a => {
+        const mm = (a.getAttribute('href') || '').match(/[?&]site=(\d+)/);
+        if (mm) maxP = Math.max(maxP, parseInt(mm[1], 10));
+      });
+      const cap = 5000;
+      if (maxP > 0) {
+        const last = Math.min(maxP, cap);
+        for (let p = 1; p <= last; p++) planned.add(p);
+        totalPagesSeen = Math.max(totalPagesSeen, last);
+      }
+      if (targetCount > 0) {
+        const minLast = Math.min(cap, Math.ceil(targetCount / PAGE_SIZE));
+        for (let p = 1; p <= minLast; p++) planned.add(p);
+        totalPagesSeen = Math.max(totalPagesSeen, minLast);
+      }
+      return maxP;
+    };
+
+    // Closed set only: site= links and ceil(target/PAGE_SIZE). One retry per
+    // zero-gain page. Never invent site=N+1 beyond that — that path ran away.
+    const takeNextPage = () => {
+      const pending = [...planned].filter(p => !visited.has(p)).sort((a, b) => a - b);
+      if (pending.length) return pending[0];
+      if (targetCount > 0 && uniqueNow() < targetCount) {
+        const again = [...zeroGain].filter(p => !retried.has(p)).sort((a, b) => a - b);
+        if (again.length) return again[0];
+      }
+      return null;
+    };
+
+    const fetchBudget = () => Math.max(4, planned.size * 2 + 2);
 
     while (true) {
+      if (++loops > 10000) break;
       if (window.__cmExportStop) { writeProgress({ status: 'aborted', lastErr: 'Abgebrochen' }); throw new Error('Abgebrochen'); }
+      if (httpAttempts >= fetchBudget()) {
+        console.warn(`[CM] ${label}: page fetch budget ${fetchBudget()} reached (unique ${uniqueNow()}${targetCount > 0 ? `/${targetCount}` : ''})`);
+        break;
+      }
+      const page = takeNextPage();
+      if (page == null) break;
       if (maxPages && page > maxPages) break;
+      if (page > 5000) break;
+
+      const isListRetry = visited.has(page);
+      if (isListRetry) retried.add(page);
+      visited.add(page);
+
       writeProgress({
         status: 'running',
         expansion: expIdx ? { idx: expIdx, total: expTotal, name: expName, id: filter.idExpansion } : null,
@@ -1110,91 +1193,85 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
       });
 
       const { res, url } = await fetchPage(page, filter, sortOverride);
-      if (res.status === 429) { console.warn('[CM] 429 pause 10s'); writeProgress({ lastErr: '429 Rate-Limit, Pause 10s' }); await sleep(10000); continue; }
+      httpAttempts++;
+      if (res.status === 429 || res.status === 403) {
+        blockStreak++;
+        if (blockStreak >= 5) throw new Error(`HTTP ${res.status} @ ${url} (${blockStreak}× — Abbruch dieses Bereichs)`);
+        const pause = res.status === 403 ? 30000 : 10000;
+        console.warn(`[CM] ${res.status} pause ${pause / 1000}s (${blockStreak}/5)`);
+        writeProgress({ lastErr: `${res.status} ${res.status === 403 ? 'Cloudflare/Block' : 'Rate-Limit'}, Pause ${pause / 1000}s` });
+        visited.delete(page);
+        if (isListRetry) retried.delete(page);
+        await sleep(pause);
+        continue;
+      }
+      blockStreak = 0;
       if (!res.ok) throw new Error(`HTTP ${res.status} @ ${url}`);
       const html = await res.text();
       const doc = new DOMParser().parseFromString(html, 'text/html');
 
-      if (page === 1) {
+      if (page === 1 && expectedListings == null) {
         expectedListings = extractExpectedListingCount(doc);
         if (expectedListings != null) {
           console.log(`[CM] ${label} sort=${sortLabel}: Cardmarket reports ${expectedListings} result listings`);
         }
       }
 
-      if (page === 1 && !filter.idExpansion && !detectedTotalPages) {
-        const links = doc.querySelectorAll('a[href*="site="]');
-        let maxP = 0;
-        links.forEach(a => {
-          const mm = (a.getAttribute('href') || '').match(/[?&]site=(\d+)/);
-          if (mm) maxP = Math.max(maxP, parseInt(mm[1], 10));
-        });
-        detectedTotalPages = maxP || null;
-      }
+      const maxP = absorbPageLinks(doc);
+      if (page === 1 && !filter.idExpansion && !detectedTotalPages) detectedTotalPages = maxP || null;
+      if (page === 1 && totalPagesSeen === 0) totalPagesSeen = 1;
 
-      if (page === 1) {
-        const links = doc.querySelectorAll('a[href*="site="]');
-        let maxP = 0;
-        links.forEach(a => {
-          const mm = (a.getAttribute('href') || '').match(/[?&]site=(\d+)/);
-          if (mm) maxP = Math.max(maxP, parseInt(mm[1], 10));
-        });
-        totalPagesSeen = maxP || 1;
-      }
-
+      const broadScope = !filter.idLanguage && !filter.idRarity
+        && !Object.keys(filter).some(k => /^is[A-Z]/.test(k) && filter[k] != null);
       let rowEls = doc.querySelectorAll('[id^="articleRow"].article-row, .article-row');
+
       if (!rowEls.length && page > 1 && page <= totalPagesSeen) {
         console.warn(`[CM] ${label} page ${page} unexpected empty (totalPagesSeen=${totalPagesSeen}). Retry in 3s...`);
-        await sleep(3000);
+        await sleep(retryMs);
         const { res: retryRes } = await fetchPage(page, filter, sortOverride);
         if (retryRes.ok) {
-          const retryHtml = await retryRes.text();
-          const retryDoc = new DOMParser().parseFromString(retryHtml, 'text/html');
+          const retryDoc = new DOMParser().parseFromString(await retryRes.text(), 'text/html');
+          absorbPageLinks(retryDoc);
           rowEls = retryDoc.querySelectorAll('[id^="articleRow"].article-row, .article-row');
-          if (rowEls.length > 0) {
-            console.log(`[CM] ${label} page ${page} retry recovered ${rowEls.length} rows`);
+          if (rowEls.length > 0) console.log(`[CM] ${label} page ${page} retry recovered ${rowEls.length} rows`);
+        }
+      }
+
+      if (!rowEls.length && page === 1 && broadScope) {
+        if (window.__cmExportStop) { writeProgress({ status: 'aborted', lastErr: 'Abgebrochen' }); throw new Error('Abgebrochen'); }
+        await sleep(retryMs);
+        const { res: p1res } = await fetchPage(1, filter, sortOverride);
+        if (p1res.ok) {
+          const p1doc = new DOMParser().parseFromString(await p1res.text(), 'text/html');
+          absorbPageLinks(p1doc);
+          rowEls = p1doc.querySelectorAll('[id^="articleRow"].article-row, .article-row');
+          if (rowEls.length) {
+            console.log(`[CM] ${label} page 1 retry recovered ${rowEls.length} rows`);
+            expectedListings = extractExpectedListingCount(p1doc);
+            if (!filter.idExpansion && !detectedTotalPages) {
+              let retryMax = 0;
+              p1doc.querySelectorAll('a[href*="site="]').forEach(a => {
+                const mm = (a.getAttribute('href') || '').match(/[?&]site=(\d+)/);
+                if (mm) retryMax = Math.max(retryMax, parseInt(mm[1], 10));
+              });
+              detectedTotalPages = retryMax || detectedTotalPages;
+            }
           }
         }
       }
 
       if (!rowEls.length) {
-        const broadScope = !filter.idLanguage && !filter.idRarity
-          && !Object.keys(filter).some(k => /^is[A-Z]/.test(k) && filter[k] != null);
-        if (page === 1 && broadScope) {
-          if (window.__cmExportStop) { writeProgress({ status: 'aborted', lastErr: 'Abgebrochen' }); throw new Error('Abgebrochen'); }
-          await sleep(3000);
-          const { res: p1res } = await fetchPage(1, filter, sortOverride);
-          if (p1res.ok) {
-            const p1doc = new DOMParser().parseFromString(await p1res.text(), 'text/html');
-            rowEls = p1doc.querySelectorAll('[id^="articleRow"].article-row, .article-row');
-            if (rowEls.length) {
-              console.log(`[CM] ${label} page 1 retry recovered ${rowEls.length} rows`);
-              expectedListings = extractExpectedListingCount(p1doc);
-              let maxP = 0;
-              p1doc.querySelectorAll('a[href*="site="]').forEach(a => {
-                const mm = (a.getAttribute('href') || '').match(/[?&]site=(\d+)/);
-                if (mm) maxP = Math.max(maxP, parseInt(mm[1], 10));
-              });
-              totalPagesSeen = maxP || 1;
-              if (!filter.idExpansion) detectedTotalPages = maxP || detectedTotalPages;
-            }
-          }
-          if (!rowEls.length) {
-            if (!debugSnippet) debugSnippet = (doc.querySelector('.table-body')?.outerHTML || doc.body?.innerHTML || html).slice(0, 2000);
-            break;
-          }
-        } else if (page === 1) {
-          if (!debugSnippet) debugSnippet = (doc.querySelector('.table-body')?.outerHTML || doc.body?.innerHTML || html).slice(0, 2000);
-          break;
-        } else {
-          emptyStreak++;
-          if (emptyStreak >= 2) break;
-          page++;
-          if (delay) await sleep(delay);
-          continue;
-        }
+        if (!debugSnippet) debugSnippet = (doc.querySelector('.table-body')?.outerHTML || doc.body?.innerHTML || html).slice(0, 2000);
+        if (page === 1) sawEmptyFirst = true;
+        pageGain.set(page, 0);
+        zeroGain.add(page);
+        const morePlanned = [...planned].some(p => !visited.has(p));
+        // No menu count and no further site= page: this scope is empty.
+        // A menu count above zero keeps the expansion incomplete instead.
+        if (page === 1 && !(targetCount > 0) && !morePlanned) break;
+        if (delay) await sleep(delay);
+        continue;
       }
-      emptyStreak = 0;
 
       let added = 0, duped = 0;
       let passAddedThisPage = 0, passDupedThisPage = 0;
@@ -1238,23 +1315,27 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
 
       pagesScanned++;
       pagesFetched++;
-      lastPageRowCount = rowEls.length;
+      pageGain.set(page, passAddedThisPage);
+      if (passAddedThisPage === 0) zeroGain.add(page);
+      else zeroGain.delete(page);
       console.log(
         `[CM] ${label} sort=${sortLabel} page ${page}: +${added} global ` +
         `(global dup ${duped}; pass unique ${passSeen.size}; pass dup ${passDuplicateCount}; total ${rows.length})`
       );
 
-      if (passAddedThisPage === 0 && passDupedThisPage > 0) break;
-
-      page++;
-      if (page > 5000) break;
+      if (targetCount > 0 && uniqueNow() >= targetCount) break;
       if (delay) await sleep(delay);
     }
 
-    const passObserved = passSeen.size + anonymousObserved;
+    const passObserved = uniqueNow();
+    const shortOfTarget = targetCount > 0 && passObserved < targetCount;
+    const countReached = targetCount > 0 && passObserved >= targetCount;
 
+    // Cardmarket's ~300 cap needs language/rarity splits — but only while we are
+    // still short of the expansion-menu count. Meeting that count means the set
+    // is done; cascading would re-walk every language and look "stuck".
     const CARDMARKET_SCOPE_CAP = 300;
-    const capSuspect = passObserved >= CARDMARKET_SCOPE_CAP;
+    const capSuspect = !countReached && passObserved >= CARDMARKET_SCOPE_CAP;
 
     return {
       added: localAdded,
@@ -1266,18 +1347,22 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
       passArticleIds: [...passSeen],
       passDuplicateCount,
       sortLabel,
+      shortOfTarget,
+      emptyFirstPage: sawEmptyFirst && shortOfTarget,
     };
   };
 
-  const scrapeScope = async (filter, label, expIdx, expTotal, expName) => {
-    const primary = await scrapePages(filter, label, expIdx, expTotal, expName, null);
+  const scrapeScope = async (filter, label, expIdx, expTotal, expName, targetCount = null) => {
+    const primary = await scrapePages(filter, label, expIdx, expTotal, expName, null, targetCount);
 
     if (maxPages) return primary;
 
+    const countMet = targetCount > 0 && primary.passObserved >= targetCount;
     const expected = (primary.expectedListings === 0 && primary.passObserved > 0) ? null : primary.expectedListings;
     const missing = (expected != null) ? Math.max(0, expected - primary.passObserved) : 0;
     const overlapWithoutCount = (expected == null && primary.passDuplicateCount > 0);
-    if (!missing && !overlapWithoutCount) return primary;
+    const shortOfTarget = targetCount > 0 && primary.passObserved < targetCount;
+    if (countMet || (!missing && !overlapWithoutCount && !shortOfTarget)) return primary;
 
     recoveryStats.attempts++;
     if (expected != null) {
@@ -1287,6 +1372,11 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
       );
       writeProgress({
         lastErr: `${label}: ${primary.passObserved}/${expected} listings; retry sort=price_desc`,
+      });
+    } else if (shortOfTarget) {
+      console.warn(`[CM] ${expName || label}: erwartet ${targetCount}, gesehen ${primary.passObserved}`);
+      writeProgress({
+        lastErr: `${expName || label}: erwartet ${targetCount}, gesehen ${primary.passObserved}`,
       });
     } else {
       console.warn(
@@ -1300,7 +1390,7 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
 
     if (delay) await sleep(delay);
     const beforeRows = rows.length;
-    const alt = await scrapePages(filter, `${label} RECOVERY`, expIdx, expTotal, expName, 'price_desc');
+    const alt = await scrapePages(filter, `${label} RECOVERY`, expIdx, expTotal, expName, 'price_desc', targetCount);
     const recoveredNow = rows.length - beforeRows;
     recoveryStats.recovered += recoveredNow;
 
@@ -1317,26 +1407,35 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
       );
     }
 
-    if (remaining > 0) {
-      console.warn(`[CM] ${label}: still missing ${remaining} listing(s) after price_desc recovery.`);
+    const stillShortTarget = targetCount > 0 && combinedObserved < targetCount;
+    const gapExpected = stillShortTarget ? targetCount : expected;
+    const gapMissing = stillShortTarget ? Math.max(0, targetCount - combinedObserved) : remaining;
+
+    if (remaining > 0 || stillShortTarget) {
+      console.warn(`[CM] ${expName || label}: erwartet ${gapExpected}, gesehen ${combinedObserved}`);
+      if (remaining > 0) console.warn(`[CM] ${label}: still missing ${remaining} listing(s) after price_desc recovery.`);
       recoveryStats.unresolved.push({
         label,
-        expected,
+        expected: gapExpected,
         observed: combinedObserved,
-        missing: remaining,
+        missing: gapMissing,
       });
       writeProgress({
-        lastErr: `${label}: still ${combinedObserved}/${expected} after price_desc; cascading if possible`,
+        lastErr: `${expName || label}: erwartet ${gapExpected}, gesehen ${combinedObserved}`,
       });
     }
 
+    const countReached = targetCount > 0 && combinedObserved >= targetCount;
     return {
       ...primary,
       added: primary.added + alt.added,
       passObserved: combinedObserved,
       passArticleIds: [...combinedIds],
       passDuplicateCount: primary.passDuplicateCount + alt.passDuplicateCount,
-      capSuspect: primary.capSuspect || remaining > 0,
+      // stillShortTarget alone is not a 300-cap: completeness recovery handles small gaps.
+      capSuspect: !countReached && (primary.capSuspect || alt.capSuspect || remaining > 0),
+      shortOfTarget: stillShortTarget,
+      emptyFirstPage: stillShortTarget && !!(primary.emptyFirstPage || alt.emptyFirstPage),
     };
   };
 
@@ -1380,62 +1479,66 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
     return [];
   };
 
-  const cascadeVariants = async (scopeFilter, scopeLabel, expIdx, expTotal, expName) => {
+  const cascadeVariants = async (scopeFilter, scopeLabel, expIdx, expTotal, expName, shouldStop = () => window.__cmExportStop) => {
     const axes = Array.isArray(splitParams) ? splitParams : [];
     const axis = axes.find(p => scopeFilter[p] == null);
-    if (!axis || window.__cmExportStop) return 0;
+    if (!axis || shouldStop()) return 0;
     let added = 0;
     for (const flag of [false, true]) {
-      if (window.__cmExportStop) break;
+      if (shouldStop()) break;
       const f = { ...scopeFilter, [axis]: flag };
       const lbl = `${scopeLabel} [${axis}=${flag ? 1 : 0}]`;
       const r = await scrapeScope(f, lbl, expIdx, expTotal, expName);
       added += r.added;
-      if (r.capSuspect) added += await cascadeVariants(f, lbl, expIdx, expTotal, expName);
+      if (r.capSuspect && !shouldStop()) added += await cascadeVariants(f, lbl, expIdx, expTotal, expName, shouldStop);
       if (delay) await sleep(delay);
     }
     return added;
   };
 
-  const cascadeRarityAndVariants = async (scopeFilter, scopeLabel, expIdx, expTotal, expName) => {
+  const cascadeRarityAndVariants = async (scopeFilter, scopeLabel, expIdx, expTotal, expName, shouldStop = () => window.__cmExportStop) => {
     let added = 0;
     if (!scopeFilter.idRarity) {
       const rarityIds = await getRarityIds();
       console.warn(`[CM] ${scopeLabel} cap/gap-suspect — cascading by rarity (${rarityIds.length})...`);
       for (const rarId of rarityIds) {
-        if (window.__cmExportStop) break;
+        if (shouldStop()) break;
         const f2 = { ...scopeFilter, idRarity: rarId };
         const lbl2 = `${scopeLabel} [rarity=${rarId}]`;
         const r3 = await scrapeScope(f2, lbl2, expIdx, expTotal, expName);
         added += r3.added;
-        if (r3.capSuspect) added += await cascadeVariants(f2, lbl2, expIdx, expTotal, expName);
+        if (r3.capSuspect && !shouldStop()) added += await cascadeVariants(f2, lbl2, expIdx, expTotal, expName, shouldStop);
         if (delay) await sleep(delay);
       }
     }
-    added += await cascadeVariants(scopeFilter, scopeLabel, expIdx, expTotal, expName);
+    if (!shouldStop()) added += await cascadeVariants(scopeFilter, scopeLabel, expIdx, expTotal, expName, shouldStop);
     return added;
   };
 
-  const scrapeWithCascade = async (baseFilter, label, expIdx, expTotal, expName, force = false) => {
-    let baseAdded = 0;
-    if (!force) {
-      const r1 = await scrapeScope(baseFilter, label, expIdx, expTotal, expName);
-      if (!r1.capSuspect) return r1.added;
-      baseAdded = r1.added;
-    }
+  const scrapeWithCascade = async (baseFilter, label, expIdx, expTotal, expName, force = false, targetCount = null) => {
+    const seenAtStart = seen.size;
+    const uniqueInScope = () => seen.size - seenAtStart;
+    const shouldStop = () => window.__cmExportStop || (targetCount > 0 && uniqueInScope() >= targetCount);
+
+    // Always try the plain scope first — even on forced re-scan — so a complete
+    // set never pays the full language×rarity walk while the row counter sits still.
+    const r1 = await scrapeScope(baseFilter, label, expIdx, expTotal, expName, targetCount);
+    if (r1.emptyFirstPage && baseFilter.idExpansion != null) expEmptyFirst[baseFilter.idExpansion] = true;
+    let totalAdded = r1.added;
+    if (shouldStop()) return totalAdded;
+    if (!force && !r1.capSuspect) return totalAdded;
 
     if (!baseFilter.idLanguage) {
       console.warn(`[CM] ${label} ${force ? 'forced completeness re-scan' : 'cap/gap-suspect'} — cascading by language...`);
       writeProgress({ lastErr: `${label}: ${force ? 'completeness recovery' : 'cap/gap suspect'}, split by language` });
-      let totalAdded = baseAdded;
       for (const langId of LANG_IDS) {
-        if (window.__cmExportStop) break;
+        if (shouldStop()) break;
         const filter = { ...baseFilter, idLanguage: langId };
         const subLabel = `${label} [lang=${langId}]`;
         const r2 = await scrapeScope(filter, subLabel, expIdx, expTotal, expName);
         totalAdded += r2.added;
-        if (r2.capSuspect) {
-          totalAdded += await cascadeRarityAndVariants(filter, subLabel, expIdx, expTotal, expName);
+        if (r2.capSuspect && !shouldStop()) {
+          totalAdded += await cascadeRarityAndVariants(filter, subLabel, expIdx, expTotal, expName, shouldStop);
         }
         if (delay) await sleep(delay);
       }
@@ -1444,7 +1547,7 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
 
     console.warn(`[CM] ${label} cap/gap-suspect bei gesetzter Sprache — teile nach Rarity/Varianten...`);
     writeProgress({ lastErr: `${label}: cap/gap suspect, split by rarity/variant` });
-    return baseAdded + await cascadeRarityAndVariants(baseFilter, label, expIdx, expTotal, expName);
+    return totalAdded + await cascadeRarityAndVariants(baseFilter, label, expIdx, expTotal, expName, shouldStop);
   };
 
   const extractExpansionIds = async () => {
@@ -1550,7 +1653,9 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
               await scrapeWithCascade(
                 { ...langBaseFilter, idExpansion: id },
                 `${i + 1}/${expansions.length} ${name}${langTag}`,
-                i + 1, expansions.length, name
+                i + 1, expansions.length, name,
+                false,
+                labelCount > 0 ? labelCount : null,
               );
             } catch (e) {
               if (e.message === 'Abgebrochen') break;
@@ -1558,9 +1663,7 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
               scopeErrors.push({ label: `${name}${langTag}`, msg: e.message });
               writeProgress({ lastErr: `${name}${langTag}: ${e.message}` });
             }
-            let addedCards = 0;
-            for (let k = beforeLen; k < rows.length; k++) addedCards += (parseInt(rows[k].amountDisplay || rows[k].amount, 10) || 0);
-            expObserved[id] = (expObserved[id] || 0) + addedCards;
+            expObserved[id] = (expObserved[id] || 0) + (rows.length - beforeLen);
             if (delay) await sleep(delay);
           }
         }
@@ -1590,14 +1693,19 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
         writeProgress({ status: 'completeness recovery', lastErr: `${sf.name}: ${expObserved[sf.id] || 0}/${expExpected[sf.id].labelCount} — Nachladen` });
         const beforeLen = rows.length;
         try {
-          await scrapeWithCascade({ idExpansion: sf.id }, `${sf.name} ⟳`, null, null, sf.name, true);
+          const want = expExpected[sf.id].labelCount;
+          await scrapeWithCascade(
+            { idExpansion: sf.id },
+            `${sf.name} ⟳`,
+            null, null, sf.name,
+            true,
+            want > 0 ? want : null,
+          );
         } catch (e) {
           if (e.message === 'Abgebrochen') break;
           console.error(`[CM] completeness re-scan ${sf.id} (${sf.name}) failed:`, e);
         }
-        let addedCards = 0;
-        for (let k = beforeLen; k < rows.length; k++) addedCards += (parseInt(rows[k].amountDisplay || rows[k].amount, 10) || 0);
-        expObserved[sf.id] = (expObserved[sf.id] || 0) + addedCards;
+        expObserved[sf.id] = (expObserved[sf.id] || 0) + (rows.length - beforeLen);
         if (delay) await sleep(delay);
       }
       if (!window.__cmExportStop) {
@@ -1610,9 +1718,18 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
           expectedTotal += labelCount;
           const obs = expObserved[id] || 0;
           observedTotal += obs;
-          if (obs < labelCount) stillShort.push({ name, expected: labelCount, observed: obs, missing: labelCount - obs });
+          if (obs < labelCount) stillShort.push({
+            name,
+            expected: labelCount,
+            observed: obs,
+            missing: labelCount - obs,
+            emptyFirstPage: !!expEmptyFirst[id],
+          });
         }
         stillShort.sort((a, b) => b.missing - a.missing);
+        for (const s of stillShort) {
+          console.warn(`[CM] ${s.name}: erwartet ${s.expected}, gesehen ${s.observed}`);
+        }
         completeness = {
           expectedTotal,
           observedTotal,
