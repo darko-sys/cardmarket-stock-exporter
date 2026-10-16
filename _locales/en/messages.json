@@ -110,6 +110,24 @@
   "opt_per_expansion": {
     "message": "Iterate per expansion (required for >300)"
   },
+  "opt_fast_then_fill": {
+    "message": "Fast first pass, then fill gaps only"
+  },
+  "opt_gap_fill_only": {
+    "message": "Gaps only (requires CSV, no first pass)"
+  },
+  "seed_csv_hint": {
+    "message": "Optional: load a previous export / partial CSV and continue"
+  },
+  "seed_csv_none": {
+    "message": "No file loaded"
+  },
+  "seed_csv_loaded": {
+    "message": "$N$ rows loaded — will be merged before scraping",
+    "placeholders": {
+      "n": { "content": "$1", "example": "1500" }
+    }
+  },
   "btn_run_export": {
     "message": "Start full export"
   },

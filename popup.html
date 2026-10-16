@@ -274,6 +274,19 @@
   <label for="perExpansion" style="margin:0" data-i18n="opt_per_expansion">Pro Erweiterung iterieren (nötig für >300)</label>
 </div>
 <div class="opts">
+  <input type="checkbox" id="fastThenFill" checked>
+  <label for="fastThenFill" style="margin:0" data-i18n="opt_fast_then_fill">Schneller Erstlauf, danach nur Lücken nachladen</label>
+</div>
+<div class="opts">
+  <input type="checkbox" id="gapFillOnly">
+  <label for="gapFillOnly" style="margin:0" data-i18n="opt_gap_fill_only">Nur Lücken (CSV voraussetzen, kein Erstlauf)</label>
+</div>
+<div style="margin:6px 0 8px;padding:8px;background:var(--sunken);border:1px solid var(--line);border-radius:6px">
+  <div style="font-size:11px;color:var(--fg-dim);margin-bottom:6px" data-i18n="seed_csv_hint">Optional: früheren Export / TEILEXPORT laden und fortsetzen</div>
+  <input type="file" id="seedCsv" accept=".csv,text/csv" style="font-size:11px;width:100%">
+  <div id="seedCsvStatus" style="font-size:10px;color:var(--fg-faint);margin-top:5px" data-i18n="seed_csv_none">Keine Datei geladen</div>
+</div>
+<div class="opts">
   <input type="checkbox" id="fetchTrend">
   <label for="fetchTrend" style="margin:0" data-i18n="opt_fetch_trend">Preis-Trend + Sammlernummer nachladen</label>
 </div>

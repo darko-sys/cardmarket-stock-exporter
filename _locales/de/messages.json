@@ -110,6 +110,24 @@
   "opt_per_expansion": {
     "message": "Pro Erweiterung iterieren (nötig für >300)"
   },
+  "opt_fast_then_fill": {
+    "message": "Schneller Erstlauf, danach nur Lücken nachladen"
+  },
+  "opt_gap_fill_only": {
+    "message": "Nur Lücken (CSV voraussetzen, kein Erstlauf)"
+  },
+  "seed_csv_hint": {
+    "message": "Optional: früheren Export / TEILEXPORT laden und fortsetzen"
+  },
+  "seed_csv_none": {
+    "message": "Keine Datei geladen"
+  },
+  "seed_csv_loaded": {
+    "message": "$N$ Zeilen geladen — werden vor dem Scrapen eingelesen",
+    "placeholders": {
+      "n": { "content": "$1", "example": "1500" }
+    }
+  },
   "btn_run_export": {
     "message": "Vollständigen Export starten"
   },

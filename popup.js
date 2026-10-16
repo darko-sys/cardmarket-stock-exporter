@@ -28,7 +28,12 @@ function showSupportResult(cards, valueEur, minutes) {
 }
 const useSortByEl = document.getElementById('useSortBy');
 const perExpansionEl = document.getElementById('perExpansion');
+const fastThenFillEl = document.getElementById('fastThenFill');
+const gapFillOnlyEl = document.getElementById('gapFillOnly');
+const seedCsvEl = document.getElementById('seedCsv');
+const seedCsvStatusEl = document.getElementById('seedCsvStatus');
 const fetchTrendEl = document.getElementById('fetchTrend');
+let seedStockRows = null;
 const abortBtn = document.getElementById('abort');
 const progressEl = document.getElementById('progress');
 const progFillEl = document.getElementById('progFill');
@@ -316,6 +321,89 @@ function stockExportMarkedPartial(result) {
   return !!(result && !result.aborted && result.completeness && result.completeness.missingTotal > 0);
 }
 
+function stockCsvToSeedRows(text) {
+  const { rows: csvRows } = parseCsv(text);
+  const out = [];
+  const yn = (v) => String(v || '').trim().toUpperCase() === 'Y';
+  for (const r of csvRows) {
+    let articleId = String(r.ArticleID || '').trim();
+    if (/^\d+(\.\d+)?[eE][+-]?\d+$/.test(articleId)) articleId = String(Math.round(parseFloat(articleId)));
+    articleId = articleId.replace(/[^\d]/g, '') || articleId;
+    if (!articleId) continue;
+    out.push({
+      articleId,
+      idProduct: String(r.idProduct || '').replace(/[^\d]/g, '') || String(r.idProduct || ''),
+      name: r.Name || '',
+      expansionCode: r.ExpansionCode || '',
+      expansion: r.Expansion || '',
+      rarity: r.Rarity || '',
+      language: r.Language || '',
+      condition: r.Condition || '',
+      conditionFull: r.ConditionFull || '',
+      reverse: yn(r.ReverseHolo),
+      foil: yn(r.Foil),
+      firstEd: yn(r.FirstEd),
+      signed: yn(r.Signed),
+      altered: yn(r.Altered),
+      playset: yn(r.Playset),
+      fullArt: yn(r.FullArt),
+      uberRare: yn(r.UberRare),
+      withDie: yn(r.WithDie),
+      comments: r.Comments || '',
+      price: r.Price_EUR || '',
+      amount: r.Amount || '',
+      amountDisplay: r.Amount || '',
+      productUrl: r.ProductUrl || '',
+      imageUrl: r.ImageUrl || '',
+    });
+  }
+  return out;
+}
+
+function normExpansionName(name) {
+  return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function countSeedArticlesByExpansion(rows) {
+  const map = new Map();
+  for (const r of rows || []) {
+    if (!r.articleId) continue;
+    const key = normExpansionName(r.expansion);
+    if (!key) continue;
+    map.set(key, (map.get(key) || 0) + 1);
+  }
+  return map;
+}
+
+if (seedCsvEl) {
+  seedCsvEl.addEventListener('change', async () => {
+    seedStockRows = null;
+    const file = seedCsvEl.files && seedCsvEl.files[0];
+    if (!file) {
+      if (seedCsvStatusEl) seedCsvStatusEl.textContent = t('seed_csv_none');
+      return;
+    }
+    try {
+      const text = await file.text();
+      seedStockRows = stockCsvToSeedRows(text);
+      if (seedCsvStatusEl) seedCsvStatusEl.textContent = t('seed_csv_loaded', [String(seedStockRows.length)]);
+      log(tl(
+        `CSV-Seed: ${seedStockRows.length} Zeilen aus „${file.name}“ geladen.`,
+        `CSV seed: loaded ${seedStockRows.length} rows from “${file.name}”.`
+      ), 'ok');
+    } catch (e) {
+      seedStockRows = null;
+      if (seedCsvStatusEl) seedCsvStatusEl.textContent = t('seed_csv_none');
+      log(tl(`CSV-Seed fehlgeschlagen: ${e.message}`, `CSV seed failed: ${e.message}`), 'err');
+    }
+  });
+}
+if (gapFillOnlyEl && fastThenFillEl) {
+  gapFillOnlyEl.addEventListener('change', () => {
+    if (gapFillOnlyEl.checked) fastThenFillEl.checked = true;
+  });
+}
+
 async function recoverExportSnapshot(tab) {
   try {
     if (tab?.id) {
@@ -391,12 +479,34 @@ async function runExport(maxPages, opts = {}) {
     const delay = parseInt(delayEl.value, 10) || 0;
     const basePath = buildBasePath();
     const useSortBy = useSortByEl.checked;
-    const perExpansion = selectedExpansionIds ? true : (perExpansionEl.checked && maxPages !== 1);
+    const fastThenFill = !!(fastThenFillEl && fastThenFillEl.checked);
+    const gapFillOnly = !!(gapFillOnlyEl && gapFillOnlyEl.checked);
+    const perExpansion = selectedExpansionIds
+      ? true
+      : ((perExpansionEl.checked || fastThenFill || gapFillOnly) && maxPages !== 1);
+    if (gapFillOnly && !(seedStockRows && seedStockRows.length)) {
+      log(tl(
+        '„Nur Lücken“ braucht eine geladene CSV. Bitte zuerst einen TEILEXPORT wählen.',
+        '“Gaps only” needs a loaded CSV. Choose a partial export first.'
+      ), 'err');
+      return;
+    }
     const cardLangIds = getSelectedCardLangIds();
     const langFilterMsg = cardLangIds.length > 0 ? t('log_card_langs', [cardLangIds.join(',')]) : '';
     log(t('log_path_info', [basePath, useSortBy, perExpansion, delay, langFilterMsg]));
+    if (seedStockRows?.length) {
+      log(tl(
+        `Seed: ${seedStockRows.length} Zeilen aus CSV — ${gapFillOnly ? 'nur Lücken' : fastThenFill ? 'Erstlauf+Lücken' : 'werden mit gescrapet'}`,
+        `Seed: ${seedStockRows.length} CSV rows — ${gapFillOnly ? 'gaps only' : fastThenFill ? 'fast then fill' : 'merged into scrape'}`
+      ), '');
+    }
 
     await chrome.storage.local.remove('cmExportSnapshot');
+    if (seedStockRows?.length) {
+      await chrome.storage.local.set({ cmExportSeed: seedStockRows });
+    } else {
+      await chrome.storage.local.remove('cmExportSeed');
+    }
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => {
@@ -423,7 +533,13 @@ async function runExport(maxPages, opts = {}) {
 
     const injected = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      args: [{ maxPages, delay, basePath, useSortBy, perExpansion, cardLangIds, selectedExpansionIds, splitParams: getSplitParams() }],
+      args: [{
+        maxPages, delay, basePath, useSortBy, perExpansion, cardLangIds, selectedExpansionIds,
+        splitParams: getSplitParams(),
+        fastThenFill: fastThenFill || gapFillOnly,
+        gapFillOnly,
+        useSeed: !!(seedStockRows && seedStockRows.length),
+      }],
       func: injectedScrapeAll,
     });
     let result = injected?.[0]?.result;
@@ -900,7 +1016,7 @@ async function injectedFetchTrends({ items, delay, conc, baseDone, grandTotal })
   return { guides, cfHits, failed, aborted: !!window.__cmExportStop };
 }
 
-async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpansion, cardLangIds, mode, selectedExpansionIds, splitParams, retryMs = 3000 }) {
+async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpansion, cardLangIds, mode, selectedExpansionIds, splitParams, retryMs = 3000, fastThenFill = false, gapFillOnly = false, useSeed = false }) {
   function parseRow(el) {
     const row = {};
     let articleId = '';
@@ -1091,6 +1207,34 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let tripCardmarketBlock = () => {};
 
+  const normExp = (name) => String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const countObsByName = (name) => {
+    const n = normExp(name);
+    let c = 0;
+    for (const r of rows) {
+      if (r.articleId && normExp(r.expansion) === n) c++;
+    }
+    return c;
+  };
+
+  if (useSeed) {
+    try {
+      const { cmExportSeed } = await chrome.storage.local.get('cmExportSeed');
+      if (Array.isArray(cmExportSeed)) {
+        let added = 0;
+        for (const r of cmExportSeed) {
+          if (!r?.articleId || seen.has(r.articleId)) continue;
+          seen.add(r.articleId);
+          rows.push(r);
+          added++;
+        }
+        console.log(`[CM] Seed: ${added} ArticleIDs aus CSV übernommen (total ${rows.length})`);
+      }
+    } catch (e) {
+      console.warn('[CM] Seed laden fehlgeschlagen:', e);
+    }
+  }
+
   const parseLooseCount = (value) => {
     const digits = String(value || '').replace(/[^\d]/g, '');
     return digits ? parseInt(digits, 10) : null;
@@ -1204,7 +1348,7 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
 
   const PAGE_SIZE = 20;
 
-  const scrapePages = async (filter, label, expIdx, expTotal, expName, sortOverride = null, targetCount = null) => {
+  const scrapePages = async (filter, label, expIdx, expTotal, expName, sortOverride = null, targetCount = null, fastMode = false) => {
     let localAdded = 0;
     let totalPagesSeen = 0;
     let pagesFetched = 0;
@@ -1241,7 +1385,8 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
         for (let p = 1; p <= last; p++) planned.add(p);
         totalPagesSeen = Math.max(totalPagesSeen, last);
       }
-      if (targetCount > 0) {
+      // Thorough mode plans ceil(target/20). Fast mode trusts site= only.
+      if (targetCount > 0 && !fastMode) {
         const minLast = Math.min(cap, Math.ceil(targetCount / PAGE_SIZE));
         for (let p = 1; p <= minLast; p++) planned.add(p);
         totalPagesSeen = Math.max(totalPagesSeen, minLast);
@@ -1249,12 +1394,12 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
       return maxP;
     };
 
-    // Closed set only: site= links and ceil(target/PAGE_SIZE). One retry per
-    // zero-gain page. Never invent site=N+1 beyond that — that path ran away.
+    // Closed set only: site= links and (thorough) ceil(target/PAGE_SIZE).
+    // One retry per zero-gain page. Never invent site=N+1 beyond that.
     const takeNextPage = () => {
       const pending = [...planned].filter(p => !visited.has(p)).sort((a, b) => a - b);
       if (pending.length) return pending[0];
-      if (targetCount > 0 && uniqueNow() < targetCount) {
+      if (!fastMode && targetCount > 0 && uniqueNow() < targetCount) {
         const again = [...zeroGain].filter(p => !retried.has(p)).sort((a, b) => a - b);
         if (again.length) return again[0];
       }
@@ -1367,6 +1512,9 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
 
       rowEls.forEach(el => {
         const row = parseRow(el);
+        // Per-expansion scrape: stamp the set name when the DOM has no expansion symbol
+        // (needed for seed/gap completeness counts by name).
+        if (expName && !row.expansion) row.expansion = expName;
         if (!row.articleId) {
           if (row.name || row.price) {
             const anonKey = (row.name || '') + '|' + (row.expansionCode || '') + '|' + (row.price || '') + '|' + (row.condition || '') + '|' + (row.comments || '');
@@ -1412,6 +1560,8 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
         `(global dup ${duped}; pass unique ${passSeen.size}; pass dup ${passDuplicateCount}; total ${rows.length})`
       );
 
+      // Fast pass: classic stop — a page of only already-seen ArticleIDs ends the set.
+      if (fastMode && passAddedThisPage === 0 && passDupedThisPage > 0) break;
       if (targetCount > 0 && uniqueNow() >= targetCount) break;
       if (delay) await sleep(delay);
     }
@@ -1441,7 +1591,7 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
     };
   };
 
-  const scrapeScope = async (filter, label, expIdx, expTotal, expName, targetCount = null) => {
+  const scrapeScope = async (filter, label, expIdx, expTotal, expName, targetCount = null, fastMode = false) => {
     if (blockedByCm) {
       return {
         added: 0, capSuspect: false, totalPagesSeen: 0, pagesFetched: 0,
@@ -1449,9 +1599,9 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
         sortLabel: 'skipped', shortOfTarget: !!(targetCount > 0), emptyFirstPage: false,
       };
     }
-    const primary = await scrapePages(filter, label, expIdx, expTotal, expName, null, targetCount);
+    const primary = await scrapePages(filter, label, expIdx, expTotal, expName, null, targetCount, fastMode);
 
-    if (maxPages || blockedByCm) return primary;
+    if (maxPages || blockedByCm || fastMode) return primary;
 
     const countMet = targetCount > 0 && primary.passObserved >= targetCount;
     const expected = (primary.expectedListings === 0 && primary.passObserved > 0) ? null : primary.expectedListings;
@@ -1486,7 +1636,7 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
 
     if (delay) await sleep(delay);
     const beforeRows = rows.length;
-    const alt = await scrapePages(filter, `${label} RECOVERY`, expIdx, expTotal, expName, 'price_desc', targetCount);
+    const alt = await scrapePages(filter, `${label} RECOVERY`, expIdx, expTotal, expName, 'price_desc', targetCount, false);
     const recoveredNow = rows.length - beforeRows;
     recoveryStats.recovered += recoveredNow;
 
@@ -1584,7 +1734,7 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
       if (shouldStop()) break;
       const f = { ...scopeFilter, [axis]: flag };
       const lbl = `${scopeLabel} [${axis}=${flag ? 1 : 0}]`;
-      const r = await scrapeScope(f, lbl, expIdx, expTotal, expName);
+      const r = await scrapeScope(f, lbl, expIdx, expTotal, expName, null, false);
       added += r.added;
       if (r.capSuspect && !shouldStop()) added += await cascadeVariants(f, lbl, expIdx, expTotal, expName, shouldStop);
       if (delay) await sleep(delay);
@@ -1601,7 +1751,7 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
         if (shouldStop()) break;
         const f2 = { ...scopeFilter, idRarity: rarId };
         const lbl2 = `${scopeLabel} [rarity=${rarId}]`;
-        const r3 = await scrapeScope(f2, lbl2, expIdx, expTotal, expName);
+        const r3 = await scrapeScope(f2, lbl2, expIdx, expTotal, expName, null, false);
         added += r3.added;
         if (r3.capSuspect && !shouldStop()) added += await cascadeVariants(f2, lbl2, expIdx, expTotal, expName, shouldStop);
         if (delay) await sleep(delay);
@@ -1611,25 +1761,30 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
     return added;
   };
 
-  const scrapeWithCascade = async (baseFilter, label, expIdx, expTotal, expName, force = false, targetCount = null) => {
+  const scrapeWithCascade = async (baseFilter, label, expIdx, expTotal, expName, force = false, targetCount = null, fastMode = false) => {
     const seenAtStart = seen.size;
     const uniqueInScope = () => seen.size - seenAtStart;
-    const shouldStop = () => (
-      blockedByCm || window.__cmExportStop || (targetCount > 0 && uniqueInScope() >= targetCount)
-    );
+    const shouldStop = () => {
+      if (blockedByCm || window.__cmExportStop) return true;
+      if (!(targetCount > 0)) return false;
+      // Prefer absolute expansion coverage (seed + prior passes) over only-new-in-this-call.
+      if (expName && countObsByName(expName) >= targetCount) return true;
+      return uniqueInScope() >= targetCount;
+    };
 
     if (blockedByCm) return 0;
+    if (shouldStop()) return 0;
 
     // Plain scope first. Meeting the menu count must not start a language walk.
-    const r1 = await scrapeScope(baseFilter, label, expIdx, expTotal, expName, targetCount);
+    const r1 = await scrapeScope(baseFilter, label, expIdx, expTotal, expName, targetCount, fastMode);
     if (r1.emptyFirstPage && baseFilter.idExpansion != null) expEmptyFirst[baseFilter.idExpansion] = true;
     let totalAdded = r1.added;
     if (shouldStop()) return totalAdded;
     if (!force && !r1.capSuspect) return totalAdded;
+    if (fastMode) return totalAdded;
 
-    // Normal pass: never run the 17-language cascade. That is what freezes the
-    // counter around ~550 while Cloudflare starts returning 403. Shortfalls stay
-    // for the completeness pass (or a later targeted re-export).
+    // Normal thorough pass: never run the 17-language cascade here. Shortfalls
+    // stay for the gap-fill / completeness pass.
     if (!force) {
       console.warn(`[CM] ${label}: cap/gap deferred — skipping language cascade this pass`);
       writeProgress({ lastErr: `${expName || label}: >300/Lücke — Kaskade übersprungen (schonender Lauf)` });
@@ -1643,7 +1798,7 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
         if (shouldStop()) break;
         const filter = { ...baseFilter, idLanguage: langId };
         const subLabel = `${label} [lang=${langId}]`;
-        const r2 = await scrapeScope(filter, subLabel, expIdx, expTotal, expName);
+        const r2 = await scrapeScope(filter, subLabel, expIdx, expTotal, expName, null, false);
         totalAdded += r2.added;
         if (r2.capSuspect && !shouldStop()) {
           totalAdded += await cascadeRarityAndVariants(filter, subLabel, expIdx, expTotal, expName, shouldStop);
@@ -1751,34 +1906,95 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
             }
           }
         } else {
-          for (let i = 0; i < expansions.length; i++) {
-            if (window.__cmExportStop) break;
-            const { id, name, labelCount } = expansions[i];
-            if (!(id in expExpected)) expExpected[id] = { name, labelCount };
-            if (labelCount === 0) { if (!(id in expObserved)) expObserved[id] = 0; continue; }
-            const beforeLen = rows.length;
-            try {
-              await scrapeWithCascade(
-                { ...langBaseFilter, idExpansion: id },
-                `${i + 1}/${expansions.length} ${name}${langTag}`,
-                i + 1, expansions.length, name,
-                false,
-                labelCount > 0 ? labelCount : null,
-              );
-            } catch (e) {
-              if (e.message === 'Abgebrochen' || e.message === 'CardmarketBlock') break;
-              console.error(`[CM] Expansion ${id} (${name})${langTag} fehlgeschlagen:`, e);
-              scopeErrors.push({ label: `${name}${langTag}`, msg: e.message });
-              writeProgress({ lastErr: `${name}${langTag}: ${e.message}` });
+          const runExpansionPass = async (passLabel, { fastMode, forceCascade, onlyShortfalls }) => {
+            const list = onlyShortfalls
+              ? expansions.filter(e => {
+                  const want = e.labelCount;
+                  if (want == null || want === 0) return false;
+                  return countObsByName(e.name) < want;
+                })
+              : expansions;
+            console.log(`[CM] ${passLabel}: ${list.length} Set(s)${fastMode ? ' [fast]' : ' [thorough]'}`);
+            for (let i = 0; i < list.length; i++) {
+              if (window.__cmExportStop || blockedByCm) break;
+              const { id, name, labelCount } = list[i];
+              if (!(id in expExpected)) expExpected[id] = { name, labelCount };
+              if (labelCount === 0) { if (!(id in expObserved)) expObserved[id] = 0; continue; }
+              const already = countObsByName(name);
+              if (!forceCascade && labelCount != null && already >= labelCount) {
+                expObserved[id] = already;
+                continue;
+              }
+              const target = (!fastMode && labelCount > 0) ? labelCount : null;
+              try {
+                await scrapeWithCascade(
+                  { ...langBaseFilter, idExpansion: id },
+                  `${passLabel} ${i + 1}/${list.length} ${name}${langTag}`,
+                  i + 1, list.length, name,
+                  !!forceCascade,
+                  target,
+                  !!fastMode,
+                );
+              } catch (e) {
+                if (e.message === 'Abgebrochen' || e.message === 'CardmarketBlock') break;
+                console.error(`[CM] Expansion ${id} (${name})${langTag} fehlgeschlagen:`, e);
+                scopeErrors.push({ label: `${name}${langTag}`, msg: e.message });
+                writeProgress({ lastErr: `${name}${langTag}: ${e.message}` });
+              }
+              expObserved[id] = countObsByName(name);
+              if (blockedByCm) break;
+              if (delay) await sleep(delay);
             }
-            expObserved[id] = (expObserved[id] || 0) + (rows.length - beforeLen);
-            if (blockedByCm) break;
-            if (delay) await sleep(delay);
+          };
+
+          if (fastThenFill || gapFillOnly) {
+            if (!gapFillOnly) {
+              writeProgress({ status: 'fast pass' + langTag, page: 0 });
+              await runExpansionPass('FAST', { fastMode: true, forceCascade: false, onlyShortfalls: false });
+            }
+            if (!blockedByCm && !window.__cmExportStop) {
+              writeProgress({ status: 'gap fill' + langTag, page: 0 });
+              await runExpansionPass('GAP', { fastMode: false, forceCascade: false, onlyShortfalls: true });
+            }
+            // Sets still short and likely over the 300-cap: one forced cascade each.
+            if (!blockedByCm && !window.__cmExportStop) {
+              const needCascade = expansions.filter(e => {
+                const want = e.labelCount;
+                if (!(want > 300)) return false;
+                return countObsByName(e.name) < want && countObsByName(e.name) >= 280;
+              });
+              for (let i = 0; i < needCascade.length; i++) {
+                if (window.__cmExportStop || blockedByCm) break;
+                const { id, name, labelCount } = needCascade[i];
+                writeProgress({ status: 'gap cascade', lastErr: `${name}: ${countObsByName(name)}/${labelCount} — Sprache teilen` });
+                try {
+                  await scrapeWithCascade(
+                    { ...langBaseFilter, idExpansion: id },
+                    `CASCADE ${name}${langTag}`,
+                    i + 1, needCascade.length, name,
+                    true,
+                    labelCount,
+                    false,
+                  );
+                } catch (e) {
+                  if (e.message === 'Abgebrochen' || e.message === 'CardmarketBlock') break;
+                }
+                expObserved[id] = countObsByName(name);
+                if (delay) await sleep(delay);
+              }
+            }
+          } else {
+            await runExpansionPass('SCRAPE', { fastMode: false, forceCascade: false, onlyShortfalls: false });
+          }
+
+          for (const e of expansions) {
+            if (!(e.id in expExpected)) expExpected[e.id] = { name: e.name, labelCount: e.labelCount };
+            expObserved[e.id] = countObsByName(e.name);
           }
         }
       } else {
         try {
-          await scrapeWithCascade(langBaseFilter, 'ALL' + langTag, 1, 1, 'ALL');
+          await scrapeWithCascade(langBaseFilter, 'ALL' + langTag, 1, 1, 'ALL', false, null, !!fastThenFill);
         } catch (e) {
           if (e.message !== 'Abgebrochen' && e.message !== 'CardmarketBlock') {
             scopeErrors.push({ label: 'ALL' + langTag, msg: e.message });
@@ -1792,32 +2008,39 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
     let completeness = null;
     const canCheckCompleteness = perExpansion && !maxPages && !langFilterActive && !blockedByCm && Object.keys(expExpected).length > 0;
     if (canCheckCompleteness && !window.__cmExportStop) {
+      // Recount from rows (includes seed + all passes).
+      for (const id of Object.keys(expExpected)) {
+        expObserved[id] = countObsByName(expExpected[id].name);
+      }
       const shortfalls = [];
       for (const id of Object.keys(expExpected)) {
         const { name, labelCount } = expExpected[id];
         if (labelCount == null) continue;
         if ((expObserved[id] || 0) < labelCount) shortfalls.push({ id, name });
       }
-      for (const sf of shortfalls) {
-        if (window.__cmExportStop) break;
-        writeProgress({ status: 'completeness recovery', lastErr: `${sf.name}: ${expObserved[sf.id] || 0}/${expExpected[sf.id].labelCount} — Nachladen` });
-        const beforeLen = rows.length;
-        try {
-          const want = expExpected[sf.id].labelCount;
-          await scrapeWithCascade(
-            { idExpansion: sf.id },
-            `${sf.name} ⟳`,
-            null, null, sf.name,
-            true,
-            want > 0 ? want : null,
-          );
-        } catch (e) {
-          if (e.message === 'Abgebrochen' || e.message === 'CardmarketBlock') break;
-          console.error(`[CM] completeness re-scan ${sf.id} (${sf.name}) failed:`, e);
+      // Extra completeness pass only when not already covered by fastThenFill gap phase.
+      if (!fastThenFill && !gapFillOnly) {
+        for (const sf of shortfalls) {
+          if (window.__cmExportStop) break;
+          writeProgress({ status: 'completeness recovery', lastErr: `${sf.name}: ${expObserved[sf.id] || 0}/${expExpected[sf.id].labelCount} — Nachladen` });
+          try {
+            const want = expExpected[sf.id].labelCount;
+            await scrapeWithCascade(
+              { idExpansion: sf.id },
+              `${sf.name} ⟳`,
+              null, null, sf.name,
+              true,
+              want > 0 ? want : null,
+              false,
+            );
+          } catch (e) {
+            if (e.message === 'Abgebrochen' || e.message === 'CardmarketBlock') break;
+            console.error(`[CM] completeness re-scan ${sf.id} (${sf.name}) failed:`, e);
+          }
+          expObserved[sf.id] = countObsByName(sf.name);
+          if (blockedByCm) break;
+          if (delay) await sleep(delay);
         }
-        expObserved[sf.id] = (expObserved[sf.id] || 0) + (rows.length - beforeLen);
-        if (blockedByCm) break;
-        if (delay) await sleep(delay);
       }
       if (!window.__cmExportStop && !blockedByCm) {
         let expectedTotal = 0, observedTotal = 0, checked = 0, uncounted = 0;
@@ -1827,7 +2050,8 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
           if (labelCount == null) { uncounted++; continue; }
           checked++;
           expectedTotal += labelCount;
-          const obs = expObserved[id] || 0;
+          const obs = countObsByName(name);
+          expObserved[id] = obs;
           observedTotal += obs;
           if (obs < labelCount) stillShort.push({
             name,
@@ -1847,7 +2071,7 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
           missingTotal: stillShort.reduce((s, x) => s + x.missing, 0),
           checkedExpansions: checked,
           uncountedExpansions: uncounted,
-          recovered: shortfalls.length - stillShort.length,
+          recovered: Math.max(0, shortfalls.length - stillShort.length),
           shortfalls: stillShort,
         };
       }
