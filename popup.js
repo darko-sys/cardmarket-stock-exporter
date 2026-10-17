@@ -34,6 +34,7 @@ const seedCsvEl = document.getElementById('seedCsv');
 const seedCsvStatusEl = document.getElementById('seedCsvStatus');
 const fetchTrendEl = document.getElementById('fetchTrend');
 let seedStockRows = null;
+let seedStockFileName = '';
 const abortBtn = document.getElementById('abort');
 const progressEl = document.getElementById('progress');
 const progFillEl = document.getElementById('progFill');
@@ -375,9 +376,37 @@ function countSeedArticlesByExpansion(rows) {
   return map;
 }
 
+function gameFromFileName(name) {
+  const games = [...gameEl.options].map(o => o.value).filter(Boolean);
+  // Prefer longer names first (e.g. FleshAndBlood before Blood).
+  games.sort((a, b) => b.length - a.length);
+  for (const g of games) {
+    if (new RegExp(`(?:^|[-_])${g}(?:[-_]|\\.|$)`, 'i').test(String(name || ''))) return g;
+  }
+  return null;
+}
+
+function syncLangGameFromTabUrl(tabUrl) {
+  const m = (tabUrl || '').match(/cardmarket\.com\/([^/]+)\/([^/]+)\//i);
+  if (!m) return null;
+  const lang = m[1];
+  const game = m[2];
+  const changed = {};
+  if ([...langEl.options].some(o => o.value === lang) && langEl.value !== lang) {
+    changed.lang = { from: langEl.value, to: lang };
+    langEl.value = lang;
+  }
+  if ([...gameEl.options].some(o => o.value === game) && gameEl.value !== game) {
+    changed.game = { from: gameEl.value, to: game };
+    gameEl.value = game;
+  }
+  return { lang: langEl.value, game: gameEl.value, changed };
+}
+
 if (seedCsvEl) {
   seedCsvEl.addEventListener('change', async () => {
     seedStockRows = null;
+    seedStockFileName = '';
     const file = seedCsvEl.files && seedCsvEl.files[0];
     if (!file) {
       if (seedCsvStatusEl) seedCsvStatusEl.textContent = t('seed_csv_none');
@@ -386,13 +415,22 @@ if (seedCsvEl) {
     try {
       const text = await file.text();
       seedStockRows = stockCsvToSeedRows(text);
+      seedStockFileName = file.name || '';
       if (seedCsvStatusEl) seedCsvStatusEl.textContent = t('seed_csv_loaded', [String(seedStockRows.length)]);
       log(tl(
         `CSV-Seed: ${seedStockRows.length} Zeilen aus „${file.name}“ geladen.`,
         `CSV seed: loaded ${seedStockRows.length} rows from “${file.name}”.`
       ), 'ok');
+      const fileGame = gameFromFileName(seedStockFileName);
+      if (fileGame && fileGame !== gameEl.value) {
+        log(tl(
+          `⚠ Dateiname = ${fileGame}, Auswahl = ${gameEl.value}. Vor dem Start Tab/Spiel auf ${fileGame} stellen.`,
+          `⚠ Filename = ${fileGame}, selection = ${gameEl.value}. Set tab/game to ${fileGame} before starting.`
+        ), 'err');
+      }
     } catch (e) {
       seedStockRows = null;
+      seedStockFileName = '';
       if (seedCsvStatusEl) seedCsvStatusEl.textContent = t('seed_csv_none');
       log(tl(`CSV-Seed fehlgeschlagen: ${e.message}`, `CSV seed failed: ${e.message}`), 'err');
     }
@@ -520,6 +558,27 @@ async function runExport(maxPages, opts = {}) {
     tab = await getTargetTab();
     if (!tab || !/cardmarket\.com/.test(tab.url || '')) {
       log(t('log_no_cm_tab'), 'err');
+      return;
+    }
+    const synced = syncLangGameFromTabUrl(tab.url || '');
+    if (synced?.changed?.game) {
+      log(tl(
+        `Spiel aus Tab übernommen: ${synced.changed.game.to} (war ${synced.changed.game.from})`,
+        `Game taken from tab: ${synced.changed.game.to} (was ${synced.changed.game.from})`
+      ), '');
+    }
+    if (synced?.changed?.lang) {
+      log(tl(
+        `Sprache aus Tab: ${synced.changed.lang.to}`,
+        `Language from tab: ${synced.changed.lang.to}`
+      ), '');
+    }
+    const seedGame = gameFromFileName(seedStockFileName);
+    if (seedStockRows?.length && seedGame && seedGame !== gameEl.value) {
+      log(tl(
+        `Abbruch: CSV ist „${seedGame}“ (${seedStockFileName}), aktiv ist „${gameEl.value}“. Bitte einen ${seedGame}-Stock-Tab öffnen und erneut starten.`,
+        `Abort: CSV is “${seedGame}” (${seedStockFileName}), active game is “${gameEl.value}”. Open a ${seedGame} stock tab and try again.`
+      ), 'err');
       return;
     }
     const delay = parseInt(delayEl.value, 10) || 0;
@@ -741,10 +800,10 @@ async function runExport(maxPages, opts = {}) {
 
     if (fetchTrendEl && fetchTrendEl.checked && !result.aborted) {
       try {
-        await attachTrends(tab, rows, delay);
+        await attachPriceGuide(rows, gameEl.value);
       } catch (e) {
-        log(tl(`⚠ Trend-Abruf fehlgeschlagen (${e.message}) — CSV wird ohne Trendspalten geschrieben.`,
-               `⚠ Trend fetch failed (${e.message}) — writing the CSV without trend columns.`), 'err');
+        log(tl(`⚠ Price-Guide-Abruf fehlgeschlagen (${e.message}) — CSV wird ohne Trendspalten geschrieben.`,
+               `⚠ Price-guide fetch failed (${e.message}) — writing the CSV without trend columns.`), 'err');
       }
     }
 
@@ -772,145 +831,207 @@ async function runExport(maxPages, opts = {}) {
   }
 }
 
-const TREND_TTL_MS = 12 * 3600 * 1000;
-const TREND_CACHE_MAX = 40000;
-const TREND_CHUNK = 400;
-const TREND_CONC = 3;
+/** Cardmarket idGame → price_guide_{id}.json (public productCatalog downloads). */
+const PRICE_GUIDE_GAME_IDS = {
+  Magic: 1,
+  WoW: 2,
+  YuGiOh: 3,
+  Spoils: 5,
+  Pokemon: 6,
+  FoW: 7,
+  Vanguard: 8,
+  FinalFantasy: 9,
+  WeissSchwarz: 10,
+  Dragoborne: 11,
+  MyLittlePony: 12,
+  DragonBallSuper: 13,
+  StarWarsDestiny: 15,
+  FleshAndBlood: 16,
+  Digimon: 17,
+  OnePiece: 18,
+  Lorcana: 19,
+  BattleSpiritsSaga: 20,
+  StarWarsUnlimited: 21,
+  Riftbound: 22,
+};
 
-async function loadTrendCache() {
-  try {
-    const { cmTrendCache } = await chrome.storage.local.get('cmTrendCache');
-    return cmTrendCache && typeof cmTrendCache === 'object' ? cmTrendCache : {};
-  } catch (e) { return {}; }
+function priceGuideUrl(game) {
+  const id = PRICE_GUIDE_GAME_IDS[game];
+  if (!id) return null;
+  return `https://downloads.s3.cardmarket.com/productCatalog/priceGuide/price_guide_${id}.json`;
 }
 
-async function saveTrendCache(cache) {
-  try {
-    const now = Date.now();
-    let entries = Object.entries(cache).filter(([, v]) => v && now - (v.t || 0) < TREND_TTL_MS);
-    if (entries.length > TREND_CACHE_MAX) {
-      entries.sort((a, b) => (b[1].t || 0) - (a[1].t || 0));
-      entries = entries.slice(0, TREND_CACHE_MAX);
-    }
-    await chrome.storage.local.set({ cmTrendCache: Object.fromEntries(entries) });
-  } catch (e) {
-    log(tl(`ℹ Trend-Zwischenspeicher konnte nicht gesichert werden: ${e.message}`,
-           `ℹ Could not persist the trend cache: ${e.message}`), '');
+function formatGuideEur(v) {
+  if (v == null || v === '') return '';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '';
+  return n.toFixed(2).replace('.', ',');
+}
+
+function pickGuideFields(entry, suffix) {
+  if (!entry) return null;
+  const trend = entry['trend' + suffix];
+  const avg1 = entry['avg1' + suffix];
+  const avg7 = entry['avg7' + suffix];
+  const avg30 = entry['avg30' + suffix];
+  if (trend == null && avg1 == null && avg7 == null && avg30 == null) return null;
+  return {
+    trend: formatGuideEur(trend),
+    avg1: formatGuideEur(avg1),
+    avg7: formatGuideEur(avg7),
+    avg30: formatGuideEur(avg30),
+  };
+}
+
+/** Pick trend/avg* for a stock row from one priceGuides[] entry (foil / holo / reverse). */
+function trendFromGuideEntry(entry, { foil = false, reverse = false } = {}) {
+  if (!entry) return null;
+  if (reverse) {
+    return pickGuideFields(entry, '-reverse')
+      || pickGuideFields(entry, '-reverse-holo')
+      || pickGuideFields(entry, '');
   }
+  if (foil) {
+    return pickGuideFields(entry, '-foil')
+      || pickGuideFields(entry, '-holo')
+      || pickGuideFields(entry, '');
+  }
+  return pickGuideFields(entry, '');
 }
 
-async function attachTrends(tab, rows, delay) {
-  const variantOf = (r) => (r.reverse ? 'isReverseHolo=Y' : (r.foil ? 'isFoil=Y' : ''));
-  const cleanUrl = (u) => String(u || '').split('?')[0].split('#')[0];
-  const keyOf = (r) => (r.idProduct || cleanUrl(r.productUrl)) + (variantOf(r) ? '|V' : '|N');
-  const byProduct = new Map();
+function indexPriceGuides(priceGuides) {
+  const map = new Map();
+  for (const g of priceGuides || []) {
+    if (g && g.idProduct != null) map.set(String(g.idProduct), g);
+  }
+  return map;
+}
+
+function applyPriceGuideToRows(rows, guideByProduct) {
+  let matched = 0;
+  let skippedNoId = 0;
+  let missingInGuide = 0;
   for (const r of rows) {
-    if (!r.productUrl) continue;
-    const k = keyOf(r);
-    if (byProduct.has(k)) continue;
-    const p = variantOf(r);
-    const base = cleanUrl(r.productUrl);
-    byProduct.set(k, p ? base + '?' + p : base);
+    const id = String(r.idProduct || '').trim();
+    if (!id) {
+      skippedNoId++;
+      continue;
+    }
+    const entry = guideByProduct.get(id);
+    const g = trendFromGuideEntry(entry, { foil: !!r.foil, reverse: !!r.reverse });
+    if (g) {
+      r.trend = g;
+      matched++;
+    } else {
+      missingInGuide++;
+    }
   }
-  const skipped = rows.filter(r => !(r.idProduct || r.productUrl) || !r.productUrl).length;
-  if (!byProduct.size) {
-    log(tl('⚠ Keine Produktlinks im Export — Trend übersprungen.',
-           '⚠ No product links in this export — trend skipped.'), 'err');
+  return { matched, skippedNoId, missingInGuide };
+}
+
+function calendarDayKey(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+async function loadPriceGuideCache(game) {
+  try {
+    const { cmPriceGuideCache } = await chrome.storage.local.get('cmPriceGuideCache');
+    const entry = cmPriceGuideCache && cmPriceGuideCache[game];
+    if (!entry || !Array.isArray(entry.priceGuides)) return null;
+    if (entry.day !== calendarDayKey()) return null;
+    return entry;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function savePriceGuideCache(game, createdAt, priceGuides) {
+  try {
+    const { cmPriceGuideCache } = await chrome.storage.local.get('cmPriceGuideCache');
+    const next = (cmPriceGuideCache && typeof cmPriceGuideCache === 'object') ? { ...cmPriceGuideCache } : {};
+    next[game] = { createdAt: createdAt || '', day: calendarDayKey(), priceGuides };
+    await chrome.storage.local.set({ cmPriceGuideCache: next });
+    try { await chrome.storage.local.remove('cmTrendCache'); } catch (e) {  }
+  } catch (e) {
+    log(tl(`ℹ Price-Guide-Zwischenspeicher konnte nicht gesichert werden: ${e.message}`,
+           `ℹ Could not persist the price-guide cache: ${e.message}`), '');
+  }
+}
+
+async function fetchPriceGuideJson(game) {
+  const url = priceGuideUrl(game);
+  if (!url) {
+    throw new Error(tl(
+      `Kein Price-Guide für Spiel „${game}“.`,
+      `No price guide for game “${game}”.`
+    ));
+  }
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} (${url})`);
+  const data = await res.json();
+  if (!data || !Array.isArray(data.priceGuides)) {
+    throw new Error(tl('Price-Guide-JSON ohne priceGuides[].', 'Price-guide JSON missing priceGuides[].'));
+  }
+  return data;
+}
+
+async function attachPriceGuide(rows, game) {
+  if (!rows.length) return;
+  const url = priceGuideUrl(game);
+  if (!url) {
+    log(tl(`⚠ Kein Price-Guide für „${game}“ — Trend übersprungen.`,
+           `⚠ No price guide for “${game}” — trend skipped.`), 'err');
     return;
   }
 
-  const cache = await loadTrendCache();
-  const now = Date.now();
-  const guides = {};
-  const missing = [];
-  for (const [id, url] of byProduct) {
-    const c = cache[id];
-    if (c && now - (c.t || 0) < TREND_TTL_MS) guides[id] = c.g;
-    else missing.push({ id, url });
-  }
+  progFillEl.style.width = '15%';
+  progTextEl.textContent = tl('Price Guide…', 'Price guide…');
 
-  if (missing.length) {
-    const perItem = (2000 + (delay || 0)) / TREND_CONC;
-    const mins = Math.max(1, Math.round(missing.length * perItem / 60000));
+  let createdAt = '';
+  let priceGuides = null;
+  const cached = await loadPriceGuideCache(game);
+  if (cached) {
+    priceGuides = cached.priceGuides;
+    createdAt = cached.createdAt || '';
     log(tl(
-      `Trend: ${byProduct.size} Abfragen (Foil/Reverse zaehlen eigen), davon ${byProduct.size - missing.length} aus dem Zwischenspeicher. ${missing.length} werden geholt — grob ${mins} Min.`,
-      `Trend: ${byProduct.size} lookups (foil/reverse counted separately), ${byProduct.size - missing.length} from cache. Fetching ${missing.length} — roughly ${mins} min.`
-    ));
-
-    let pollTimer = null;
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => { window.__cmTrendProgress = null; },
-      });
-      pollTimer = setInterval(async () => {
-        try {
-          const [{ result: p }] = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            func: () => window.__cmTrendProgress || null,
-          });
-          if (!p) return;
-          const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
-          progFillEl.style.width = pct + '%';
-          progTextEl.textContent = tl(
-            `Trend ${p.done}/${p.total}${p.lastErr ? ' ⚠ ' + p.lastErr : ''}`,
-            `Trend ${p.done}/${p.total}${p.lastErr ? ' ⚠ ' + p.lastErr : ''}`
-          );
-        } catch (e) {  }
-      }, 800);
-
-      let cfHits = 0, failed = 0, aborted = false;
-      for (let i = 0; i < missing.length; i += TREND_CHUNK) {
-        const chunk = missing.slice(i, i + TREND_CHUNK);
-        const [{ result: res }] = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          args: [{ items: chunk, delay, conc: TREND_CONC, baseDone: i, grandTotal: missing.length }],
-          func: injectedFetchTrends,
-        });
-        if (!res) break;
-        Object.assign(guides, res.guides);
-        for (const [id, g] of Object.entries(res.guides)) cache[id] = { t: Date.now(), g };
-        cfHits += res.cfHits || 0;
-        failed += res.failed || 0;
-        if (res.aborted) { aborted = true; break; }
-      }
-
-      await saveTrendCache(cache);
-      const got = Object.keys(guides).length;
-      log(tl(
-        `Trend: ${got}/${byProduct.size} Abfragen mit Werten${failed ? `, ${failed} ohne Antwort` : ''}${cfHits ? `, ${cfHits}× Cloudflare-Bremse` : ''}.`,
-        `Trend: ${got}/${byProduct.size} lookups with values${failed ? `, ${failed} without a response` : ''}${cfHits ? `, ${cfHits} Cloudflare stalls` : ''}.`
-      ), got ? 'ok' : 'err');
-      if (aborted) log(tl('⚠ Trend-Abruf abgebrochen — die restlichen Zeilen bleiben ohne Trendwerte.',
-                          '⚠ Trend fetch aborted — the remaining rows have no trend values.'), 'err');
-    } finally {
-      if (pollTimer) clearInterval(pollTimer);
-    }
+      `Price Guide: Zwischenspeicher für ${game} (Stand ${createdAt || cached.day}).`,
+      `Price guide: cache hit for ${game} (as of ${createdAt || cached.day}).`
+    ), 'ok');
   } else {
-    log(tl(`Trend: alle ${byProduct.size} Abfragen aus dem Zwischenspeicher — keine Anfrage nötig.`,
-           `Trend: all ${byProduct.size} lookups served from cache — no requests needed.`), 'ok');
+    log(tl(
+      `Price Guide: lade price_guide für ${game} (ein Download)…`,
+      `Price guide: downloading guide for ${game} (one file)…`
+    ));
+    progFillEl.style.width = '40%';
+    const data = await fetchPriceGuideJson(game);
+    priceGuides = data.priceGuides;
+    createdAt = data.createdAt || '';
+    await savePriceGuideCache(game, createdAt, priceGuides);
+    log(tl(
+      `Price Guide: ${priceGuides.length} Produkte geladen (Stand ${createdAt || '—'}).`,
+      `Price guide: loaded ${priceGuides.length} products (as of ${createdAt || '—'}).`
+    ), 'ok');
   }
 
-  let numsFilled = 0;
-  for (const r of rows) {
-    if (!r.productUrl) continue;
-    const key = keyOf(r);
-    if (!guides[key]) continue;
-    const g = guides[key];
-    r.trend = g;
-    if (!g.num) continue;
-    const ec = String(r.expansionCode || '');
-    if (/\d/.test(ec.slice(ec.lastIndexOf(' ') + 1))) continue;
-    r.expansionCode = ec ? ec + ' ' + g.num : g.num;
-    numsFilled++;
-  }
-  if (numsFilled) {
-    log(tl(`Sammlernummer für ${numsFilled} Zeile(n) ergänzt, die der Bestand nicht mitliefert.`,
-           `Filled in the collector number for ${numsFilled} row(s) the stock listing does not provide.`), 'ok');
-  }
-  if (skipped) {
-    log(tl(`ℹ ${skipped} Zeile(n) ohne Produktlink — dort bleiben die Trend-Spalten leer.`,
-           `ℹ ${skipped} row(s) without a product link — their trend columns stay empty.`), '');
+  progFillEl.style.width = '80%';
+  progTextEl.textContent = tl('Price Guide zuordnen…', 'Joining price guide…');
+  const byId = indexPriceGuides(priceGuides);
+  const { matched, skippedNoId, missingInGuide } = applyPriceGuideToRows(rows, byId);
+  progFillEl.style.width = '100%';
+  log(tl(
+    `Price Guide: ${matched}/${rows.length} Zeilen mit Trendwerten` +
+      (skippedNoId ? `, ${skippedNoId} ohne idProduct` : '') +
+      (missingInGuide ? `, ${missingInGuide} ohne Guide-Eintrag` : '') + '.',
+    `Price guide: ${matched}/${rows.length} rows with trend values` +
+      (skippedNoId ? `, ${skippedNoId} without idProduct` : '') +
+      (missingInGuide ? `, ${missingInGuide} missing from guide` : '') + '.'
+  ), matched ? 'ok' : 'err');
+  if (skippedNoId) {
+    log(tl(`ℹ ${skippedNoId} Zeile(n) ohne idProduct — Trendspalten bleiben leer.`,
+           `ℹ ${skippedNoId} row(s) without idProduct — trend columns stay empty.`), '');
   }
 }
 
@@ -977,108 +1098,6 @@ function buildCsv(rows, meta = {}) {
   return lines.join('\r\n');
 }
 
-
-async function injectedFetchTrends({ items, delay, conc, baseDone, grandTotal }) {
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  const isChallenge = (html) => /cf-mitigated|cf-chl-bypass|Just a moment|Checking your browser|cf-browser-verification|Cloudflare Ray ID/i.test(html || '');
-  const isCfStatus = (s) => s === 403 || s === 520 || s === 521 || s === 522 || s === 524 || s === 525;
-
-  const PRICE = /^\d{1,3}(?:\.\d{3})*,\d{1,2}(?:\s*€)?$/;
-  const KEYS = [
-    ['trend', /^(?:preis[\s-]*trend|price trend|tendance des prix|tendencia de precio|tendenza di prezzo)/i],
-    ['avg30', /(?:^|\D)30[\s-]*(?:tag|day|jour|d[íi]a|giorn)/i],
-    ['avg7', /(?:^|\D)7[\s-]*(?:tag|day|jour|d[íi]a|giorn)/i],
-    ['avg1', /(?:^|\D)1[\s-]*(?:tag|day|jour|d[íi]a|giorn)/i],
-  ];
-  const NUMLBL = /^(?:number|nummer|num[ée]ro|n[úu]mero|numero|nombre)$/i;
-  const NUMVAL = /^\d{1,5}[a-z]?(?:\/\d+)?$/i;
-
-  function parseGuide(html) {
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    const leaves = [];
-    doc.querySelectorAll('*').forEach(el => {
-      if (el.children.length) return;
-      const t = (el.textContent || '').trim().replace(/\s+/g, ' ');
-      if (t) leaves.push(t);
-    });
-    const g = {};
-    const seenLabels = new Set();
-    for (let i = 0; i < leaves.length; i++) {
-      const lbl = leaves[i];
-      if (lbl.length > 60) continue;
-      if (!g.num && lbl.length < 20 && NUMLBL.test(lbl) && NUMVAL.test(leaves[i + 1] || '')) {
-        g.num = leaves[i + 1];
-      }
-      for (const [k, re] of KEYS) {
-        if (!re.test(lbl)) continue;
-        seenLabels.add(k);
-        if (g[k]) continue;
-        const v = PRICE.test(leaves[i + 1] || '') ? leaves[i + 1]
-          : (PRICE.test(leaves[i + 2] || '') ? leaves[i + 2] : '');
-        if (v) g[k] = v.replace(/\s*€$/, '').trim();
-      }
-    }
-    return seenLabels.size >= 2 ? g : null;
-  }
-
-  const guides = {};
-  let done = 0, cfHits = 0, failed = 0;
-  const queue = items.slice();
-
-  async function fetchOne(url) {
-    for (let attempt = 0; attempt < 4; attempt++) {
-      if (window.__cmExportStop) return null;
-      try {
-        const res = await fetch(url, { credentials: 'include' });
-        if (res.status === 404) return null;
-        if (res.status === 429) {
-          const back = 8000 * (attempt + 1);
-          window.__cmTrendProgress = Object.assign({}, window.__cmTrendProgress || {}, { lastErr: `429 → Pause ${back / 1000}s` });
-          await sleep(back);
-          continue;
-        }
-        if (isCfStatus(res.status)) {
-          cfHits++;
-          const back = 30000 + 15000 * attempt;
-          window.__cmTrendProgress = Object.assign({}, window.__cmTrendProgress || {}, { lastErr: `CF-${res.status} → Pause ${back / 1000}s` });
-          await sleep(back);
-          continue;
-        }
-        if (!res.ok) { await sleep(2000); continue; }
-        const html = await res.text();
-        if (isChallenge(html)) {
-          cfHits++;
-          const back = 30000 + 15000 * attempt;
-          window.__cmTrendProgress = Object.assign({}, window.__cmTrendProgress || {}, { lastErr: `CF-Challenge → Pause ${back / 1000}s` });
-          await sleep(back);
-          continue;
-        }
-        return parseGuide(html);
-      } catch (e) {
-        await sleep(1500);
-      }
-    }
-    return null;
-  }
-
-  async function worker() {
-    while (queue.length) {
-      if (window.__cmExportStop) return;
-      const it = queue.shift();
-      const g = await fetchOne(it.url);
-      if (g === null) failed++;
-      else guides[it.id] = g;
-      done++;
-      window.__cmTrendProgress = Object.assign({}, window.__cmTrendProgress || {}, {
-        done: baseDone + done, total: grandTotal, cfHits, failed,
-      });
-      if (delay) await sleep(delay);
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.max(1, conc || 1) }, worker));
-  return { guides, cfHits, failed, aborted: !!window.__cmExportStop };
-}
 
 async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpansion, cardLangIds, mode, selectedExpansionIds, splitParams, retryMs = 3000, fastThenFill = false, gapFillOnly = false, useSeed = false }) {
   function parseRow(el) {
@@ -1994,6 +2013,15 @@ async function injectedScrapeAll({ maxPages, delay, basePath, useSortBy, perExpa
                   const want = e.labelCount;
                   if (want == null || want === 0) return false;
                   return countObsByName(e.name) < want;
+                }).sort((a, b) => {
+                  // Empty-in-seed sets first (menu has count, CSV has 0), then tiniest holes.
+                  const oa = countObsByName(a.name);
+                  const ob = countObsByName(b.name);
+                  if (oa === 0 && ob !== 0) return -1;
+                  if (ob === 0 && oa !== 0) return 1;
+                  const da = (a.labelCount || 0) - oa;
+                  const db = (b.labelCount || 0) - ob;
+                  return da - db;
                 })
               : expansions;
             console.log(`[CM] ${passLabel}: ${list.length} Set(s)${fastMode ? ' [fast]' : ' [thorough]'}`);

@@ -1,12 +1,15 @@
 {
   "manifest_version": 3,
   "name": "__MSG_extName__",
-  "version": "2.4.3",
+  "version": "2.5.0",
   "description": "__MSG_extDescription__",
   "default_locale": "de",
   "author": "LUPZN",
-  "permissions": ["activeTab", "scripting", "downloads", "tabs", "storage"],
-  "host_permissions": ["https://www.cardmarket.com/*"],
+  "permissions": ["activeTab", "scripting", "downloads", "tabs", "storage", "unlimitedStorage"],
+  "host_permissions": [
+    "https://www.cardmarket.com/*",
+    "https://downloads.s3.cardmarket.com/*"
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "__MSG_extTitle__",

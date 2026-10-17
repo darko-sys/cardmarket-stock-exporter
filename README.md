@@ -46,7 +46,8 @@ Tested on collections with **19,000+ cards**. Works reliably.
 - **Deduplication** — via Cardmarket article ID, no duplicate rows
 - **Rate-limit aware** — automatic 10-second pause on HTTP 429
 - **Excel-ready CSV** — UTF-8 BOM, semicolon separator, proper escaping
-- **📈 Price trend, 1/7/30-day averages and collector numbers** *(v2.4, opt-in)* — the numbers Cardmarket only shows on the product page, brought into the CSV, plus a derived `PriceVsTrend_Pct` column to sort by. Foil and reverse-holo rows get their own values, because Cardmarket keeps a separate guide per print variant. One request per product and variant (not per row) at roughly 0.6 s each, cached for 12 hours, with a time estimate before it starts. Off by default; for large stocks combine it with the set export.
+- **📈 Price trend and 1/7/30-day averages** *(v2.4, guide join in v2.5, opt-in)* — fills `TrendPrice_EUR`, `Avg1/7/30_EUR` and a derived `PriceVsTrend_Pct` from Cardmarket’s official daily price-guide JSON (one download per game per day). Foil rows use `*-foil` (Pokémon: `*-holo`). Reverse-holo uses guide reverse fields when present, otherwise non-foil. The guide has no collector numbers — `CollectorNumber` stays whatever the stock row already has. Off by default.
+- **Resume a partial export (seed + gap-fill)** *(v2.5)* — load a previous CSV / `TEILEXPORT`, then run **Gaps only** (or keep **Fast first pass, then fill gaps**). The exporter injects those rows as a seed and only scrapes sets that still fall short of Cardmarket’s menu `(N)` count.
 
 ### ✏️ Bulk Price Update *(v2.0, hardened in v2.1)*
 - **Edit prices in Excel/Google Sheets**, re-upload CSV → all listings updated on Cardmarket
@@ -82,7 +83,7 @@ Tested on collections with **19,000+ cards**. Works reliably.
 | `Name` | Card name including set code |
 | `ExpansionCode` | Combined set + collector code (e.g. `sv2a 063`) — kept for backwards compat |
 | `SetCode` *(v2.1, fixed in v2.4)* | Set code only (e.g. `sv2a`, `SUM`). Read from the product image URL, so it works for every game, not just the ones that print it in the card name |
-| `CollectorNumber` *(v2.1, fixed in v2.4)* | Collector number only (e.g. `063`, or `001/250`). Outside Pokémon the stock listing does not carry it; tick **"Load price trend + collector number"** to fill it from the product page |
+| `CollectorNumber` *(v2.1, fixed in v2.4)* | Collector number only (e.g. `063`, or `001/250`). Taken from the stock row (`ExpansionCode` / image). The daily price guide does not include collector numbers |
 | `Expansion` | Full expansion name (e.g. `Pokémon Card 151`) |
 | `Rarity` | Card rarity (Common, Uncommon, Rare, ...) |
 | `Language` | Card language |
@@ -98,8 +99,8 @@ Tested on collections with **19,000+ cards**. Works reliably.
 | `_OriginalPrice_EUR` *(v2.1)* | **Read-only reference** — leave untouched. Same Skip-Fetch role as `_OriginalComments`. |
 | `Amount` | Quantity in stock |
 | `Total_EUR` | Price × Amount |
-| `TrendPrice_EUR` *(v2.4)* | Cardmarket price trend. Only present when **"Load price trend + collector number"** was ticked |
-| `Avg1_EUR` / `Avg7_EUR` / `Avg30_EUR` *(v2.4)* | 1-, 7- and 30-day average sale price |
+| `TrendPrice_EUR` *(v2.4)* | Cardmarket price trend from the daily price guide. Only present when **"Price trend from the daily price guide"** was ticked |
+| `Avg1_EUR` / `Avg7_EUR` / `Avg30_EUR` *(v2.4)* | 1-, 7- and 30-day average sale price (same guide; foil/holo-aware) |
 | `PriceVsTrend_Pct` *(v2.4)* | Derived: how far `Price_EUR` sits above (+) or below (−) the trend, in percent. Sort by it to find what needs repricing. Empty when either value is missing |
 | `ProductUrl` | Direct link to the card on Cardmarket |
 | `ImageUrl` | Direct link to the card image |
@@ -167,6 +168,17 @@ Export metadata (timestamp, locale, game, tool version) lives in the **filename*
 9. When finished, Chrome opens a **Save As** dialog and you choose where the CSV goes. The suggested file name is:
    `cardmarket-stock-{date}-{locale}-{game}-v{version}.csv`
    A set export or a partial export appends a suffix to that name.
+
+### Resume an incomplete export (seed + gap-fill) *(v2.5)*
+
+If a run stopped early (rate limit, abort, `TEILEXPORT` in the file name), you do **not** need a separate “diff two CSVs” tool:
+
+1. Open a stock tab for the **same game** as in the CSV file name (e.g. Magic CSV → Magic tab — a Pokémon tab will abort).
+2. Under the export options, choose the previous CSV in **load a previous export / partial CSV**.
+3. Tick **Gaps only** to skip the full first pass and only scrape sets that are short of the menu `(N)` count. Or leave **Fast first pass, then fill gaps** on if you want a quick pass before the gap pass.
+4. Start the export. Seed rows are injected first; the gap pass prefers empty sets, then tiny holes, and still respects the ~300-per-filter Cardmarket cap via cascading.
+
+The progress line’s **Rows** (Zeilen) is unique listings; **Stock** is the sum of `Amount`. A set can look “done” by Rows while Stock is still below the menu count if quantities differ — gap-fill keys off Cardmarket’s menu count vs collected ArticleIDs.
 
 ### What you will see during export
 
@@ -315,12 +327,13 @@ Before v2.4.3 an edit rewrote the whole want from the CSV row and could reset qu
 |-----------|-----|
 | `activeTab` | Access the current tab when you click the icon |
 | `tabs` | Find the Cardmarket tab when popup is pinned to a separate window |
-| `scripting` | Run the export, price-trend, update and want-list code in the Cardmarket tab |
+| `scripting` | Run the export, update and want-list code in the Cardmarket tab |
 | `downloads` | Pass the generated CSV to Chrome, which opens a Save As dialog |
-| `storage` | Remember the UI language and cache price-trend values for 12 hours, locally in `chrome.storage.local` |
-| `host_permissions: cardmarket.com` | Load your stock, want-list and product pages on `www.cardmarket.com` and submit the changes you confirm |
+| `storage` / `unlimitedStorage` | Remember the UI language and cache the daily price-guide JSON per game in `chrome.storage.local` |
+| `host_permissions: www.cardmarket.com` | Load your stock, want-list and product pages and submit the changes you confirm |
+| `host_permissions: downloads.s3.cardmarket.com` | Download Cardmarket’s public daily price-guide JSON when the trend option is ticked |
 
-No access to any other website, no access to browsing history, no access to tabs outside cardmarket.com.
+No access to browsing history, no access to tabs outside those hosts.
 
 ---
 

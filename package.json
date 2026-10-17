@@ -2,7 +2,7 @@
   "name": "cardmarket-stock-exporter",
   "private": true,
   "scripts": {
-    "test": "node --test test/pagination.test.mjs"
+    "test": "node --test test/pagination.test.mjs test/seed-and-gap.test.mjs test/price-guide.test.mjs"
   },
   "devDependencies": {
     "jsdom": "^26.1.0"

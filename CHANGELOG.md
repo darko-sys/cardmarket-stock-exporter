@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), version
 
 ---
 
+## [2.5.0] - 2026-10-17
+
+### Changed
+
+- **Price trend comes from Cardmarket’s daily price guide**, not from product-page scraping. One `price_guide_{idGame}.json` download per game per calendar day (cached in `chrome.storage.local`), joined on `idProduct`. Foil rows use `*-foil`; Pokémon uses `*-holo`. Reverse-holo uses reverse fields when the guide has them, otherwise non-foil. CSV columns are unchanged: `TrendPrice_EUR`, `Avg1_EUR`, `Avg7_EUR`, `Avg30_EUR`, `PriceVsTrend_Pct`. Collector numbers are no longer filled from product pages — the guide does not include them.
+- Host permission added for `https://downloads.s3.cardmarket.com/*`, plus `unlimitedStorage` for the guide blob. The old per-product `cmTrendCache` is removed when a guide is saved.
+
+### Added
+
+- **Seed + gap-fill as the supported resume path** for incomplete / `TEILEXPORT` runs: load the prior CSV, tick **Gaps only** (or keep fast-then-fill), keep the stock tab on the same game as the file name. Documented in the README (Rows vs Stock, Magic-tab mismatch abort).
+
+### Removed
+
+- Product-page trend scrape (`injectedFetchTrends`) and the 12-hour per-product trend cache path.
+
+---
+
 ## [2.4.3] - 2026-10-04
 
 ### If you used want-list bulk edit before this version

@@ -114,10 +114,10 @@
     "message": "Fast first pass, then fill gaps only"
   },
   "opt_gap_fill_only": {
-    "message": "Gaps only (requires CSV, no first pass)"
+    "message": "Gaps only — requires seed CSV, no first pass (resume)"
   },
   "seed_csv_hint": {
-    "message": "Optional: load a previous export / partial CSV and continue"
+    "message": "Optional: load a previous export / TEILEXPORT and resume with “Gaps only” (same game tab as in the file name)"
   },
   "seed_csv_none": {
     "message": "No file loaded"
@@ -601,9 +601,9 @@
     "message": "Controls the language Cardmarket returns set and card names in, and therefore what ends up in your CSV. Independent of this popup’s language."
   },
   "opt_fetch_trend": {
-    "message": "Load price trend + collector number"
+    "message": "Price trend from the daily price guide"
   },
   "opt_fetch_trend_hint": {
-    "message": "Loads each card's product page, roughly 0.6 s per card. Provides the price trend, the 1/7/30-day averages and the collector number, which Magic and most other games leave out of the stock listing. Values are kept for 12 h, so a second export finishes instantly."
+    "message": "One download of Cardmarket's official daily price-guide JSON (once per game per day). Writes trend and 1/7/30-day averages into the CSV — foil-aware; Pokémon uses holo fields. Reverse-holo only when the guide has reverse values, otherwise non-foil. The guide has no collector numbers."
   }
 }

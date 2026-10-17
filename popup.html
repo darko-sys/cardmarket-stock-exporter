@@ -279,18 +279,18 @@
 </div>
 <div class="opts">
   <input type="checkbox" id="gapFillOnly">
-  <label for="gapFillOnly" style="margin:0" data-i18n="opt_gap_fill_only">Nur Lücken (CSV voraussetzen, kein Erstlauf)</label>
+  <label for="gapFillOnly" style="margin:0" data-i18n="opt_gap_fill_only">Nur Lücken — Seed-CSV voraussetzen, kein Erstlauf (Resume)</label>
 </div>
 <div style="margin:6px 0 8px;padding:8px;background:var(--sunken);border:1px solid var(--line);border-radius:6px">
-  <div style="font-size:11px;color:var(--fg-dim);margin-bottom:6px" data-i18n="seed_csv_hint">Optional: früheren Export / TEILEXPORT laden und fortsetzen</div>
+  <div style="font-size:11px;color:var(--fg-dim);margin-bottom:6px" data-i18n="seed_csv_hint">Optional: früheren Export / TEILEXPORT laden und mit „Nur Lücken“ fortsetzen (gleicher Spiel-Tab wie im Dateinamen)</div>
   <input type="file" id="seedCsv" accept=".csv,text/csv" style="font-size:11px;width:100%">
   <div id="seedCsvStatus" style="font-size:10px;color:var(--fg-faint);margin-top:5px" data-i18n="seed_csv_none">Keine Datei geladen</div>
 </div>
 <div class="opts">
   <input type="checkbox" id="fetchTrend">
-  <label for="fetchTrend" style="margin:0" data-i18n="opt_fetch_trend">Preis-Trend + Sammlernummer nachladen</label>
+  <label for="fetchTrend" style="margin:0" data-i18n="opt_fetch_trend">Preis-Trend aus dem Tages-Price-Guide</label>
 </div>
-<div id="trendHint" style="font-size:10px;color:#888;margin:-4px 0 8px 22px;line-height:1.4" data-i18n="opt_fetch_trend_hint">Ruft je Karte die Produktseite ab, rund 0,6 s pro Karte. Liefert Preis-Trend, 1/7/30-Tage-Schnitt und die Sammlernummer, die Magic und die meisten Spiele im Bestand nicht mitliefern. Werte bleiben 12 h gespeichert, ein zweiter Export ist sofort fertig.</div>
+<div id="trendHint" style="font-size:10px;color:#888;margin:-4px 0 8px 22px;line-height:1.4" data-i18n="opt_fetch_trend_hint">Ein Download der offiziellen Cardmarket-Price-Guide-JSON (einmal pro Spiel und Tag). Schreibt Trend, 1/7/30-Tage-Schnitt in die CSV — foil-aware; bei Pokémon Holo-Felder. Reverse-Holo nur wenn der Guide eigene Reverse-Werte hat, sonst Non-Foil. Keine Sammlernummer aus dem Guide.</div>
 
 <button id="run" data-i18n="btn_run_export">Vollständigen Export starten</button>
 <button id="abort" class="secondary" style="background:#dc2626;display:none" data-i18n="btn_abort">Abbrechen</button>

@@ -114,10 +114,10 @@
     "message": "Schneller Erstlauf, danach nur Lücken nachladen"
   },
   "opt_gap_fill_only": {
-    "message": "Nur Lücken (CSV voraussetzen, kein Erstlauf)"
+    "message": "Nur Lücken — Seed-CSV voraussetzen, kein Erstlauf (Resume)"
   },
   "seed_csv_hint": {
-    "message": "Optional: früheren Export / TEILEXPORT laden und fortsetzen"
+    "message": "Optional: früheren Export / TEILEXPORT laden und mit „Nur Lücken“ fortsetzen (gleicher Spiel-Tab wie im Dateinamen)"
   },
   "seed_csv_none": {
     "message": "Keine Datei geladen"
@@ -601,9 +601,9 @@
     "message": "Bestimmt, in welcher Sprache Cardmarket die Set- und Kartennamen liefert — also auch die Inhalte deiner CSV. Unabhängig von der Sprache dieser Oberfläche."
   },
   "opt_fetch_trend": {
-    "message": "Preis-Trend + Sammlernummer nachladen"
+    "message": "Preis-Trend aus dem Tages-Price-Guide"
   },
   "opt_fetch_trend_hint": {
-    "message": "Ruft je Karte die Produktseite ab, rund 0,6 s pro Karte. Liefert Preis-Trend, 1/7/30-Tage-Schnitt und die Sammlernummer, die Magic und die meisten Spiele im Bestand nicht mitliefern. Werte bleiben 12 h gespeichert, ein zweiter Export ist sofort fertig."
+    "message": "Ein Download der offiziellen Cardmarket-Price-Guide-JSON (einmal pro Spiel und Tag). Schreibt Trend, 1/7/30-Tage-Schnitt in die CSV — foil-aware; bei Pokémon Holo-Felder. Reverse-Holo nur wenn der Guide eigene Reverse-Werte hat, sonst Non-Foil. Keine Sammlernummer aus dem Guide."
   }
 }
