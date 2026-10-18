@@ -1,21 +1,21 @@
 # Privacy Policy — Cardmarket Stock Exporter
 
-**Last updated:** 2026-10-04
+**Last updated:** 2026-10-18
 
 ## Summary
 
-The extension works inside your browser and talks to one site only: `www.cardmarket.com`, in the tab where you are already logged in. It sends nothing to the developer or to any third party, and it contains no analytics or tracking.
+The extension works inside your browser and talks to Cardmarket only: your logged-in tab on `www.cardmarket.com`, and — if you tick the price-trend option — Cardmarket’s public daily price-guide files on `downloads.s3.cardmarket.com`. It sends nothing to the developer or to any other third party, and it contains no analytics or tracking.
 
-It keeps two things on your computer: the interface language you chose and a cache of price figures that it reuses for 12 hours. The section "Where data is stored" describes both.
+It keeps two things on your computer: the interface language you chose and a cache of the daily price-guide JSON for each game you load trends for. The section "Where data is stored" describes both.
 
 ## What data the extension accesses
 
-Every network request the extension makes goes to `https://www.cardmarket.com/*`, and it makes none until you click a button in the popup. When the popup opens, it only looks at the address of your Cardmarket tab to preselect the site language and the game.
+Every network request the extension makes goes to `https://www.cardmarket.com/*` or, for the optional price guide, to `https://downloads.s3.cardmarket.com/*`. It makes none until you click a button in the popup. When the popup opens, it only looks at the address of your Cardmarket tab to preselect the site language and the game.
 
 ### What it reads
 
 - For a stock export, including the list of your sets, it loads your own stock pages. From each listing it takes the article ID, product ID, card name, expansion, rarity, language, condition, variant flags such as foil or reverse holo, comment, price and quantity, along with the links to the product page and the card image. It also reads the expansion and rarity filters of your stock page.
-- If you tick "Load price trend + collector number" (off by default), it loads the Cardmarket product page of each product in the export and takes the price trend, the 1-day, 7-day and 30-day average prices and the collector number.
+- If you tick "Price trend from the daily price guide" (off by default), it downloads Cardmarket’s public `price_guide_{idGame}.json` once for that game (reused for the calendar day) and joins trend / 1-day / 7-day / 30-day averages onto export rows by product ID and foil/holo flags.
 - For a want-list export it loads the overview of your want lists and the pages of each list. Per entry it takes the list name, Cardmarket's internal IDs for list, entry and card, the card name, expansion, accepted languages, minimum condition, attribute requirements, maximum price, quantity and the product link.
 - For Bulk Update, and for editing or deleting wants, it reads the CSV file you select in the popup. For the rows it is about to compare or change, it loads the edit form Cardmarket shows for that listing or want and reads the current values from it. If the ID of a listing has changed since the export, it loads your stock page for that product to find the listing again.
 
@@ -43,7 +43,7 @@ The extension never asks for your password. It does not pick out, store or trans
 
 None. The extension:
 
-- sends no data to any server other than `www.cardmarket.com`
+- sends no data to any server other than `www.cardmarket.com` and, when the price-trend option is on, `downloads.s3.cardmarket.com`
 - contains no analytics, tracking pixels or telemetry
 - sets no cookies of its own
 - uses no third-party SDKs or libraries that contact remote servers
@@ -62,7 +62,7 @@ The popup reads a CSV you select for an update. The extension uses its values fo
 The extension keeps two entries in `chrome.storage.local`. They stay on your computer and are never transmitted.
 
 - `uiLocale` holds the interface language you picked (Auto, DE or EN).
-- `cmTrendCache` holds what the price-trend option looked up: for each product and print variant the price trend, the 1-day, 7-day and 30-day averages, the collector number and the time of the lookup, filed under the Cardmarket product ID (or the product page address if the ID is missing). An entry is reused for 12 hours. The extension removes older entries the next time it loads trend data, and the cache holds at most 40,000 entries.
+- `cmPriceGuideCache` holds the daily price-guide payload per game (creation timestamp from Cardmarket and the `priceGuides` list), reused for the calendar day. Older per-product trend caches under `cmTrendCache` are removed when a guide is saved.
 
 Chrome deletes both when you remove the extension.
 
@@ -78,14 +78,15 @@ While a job runs, the extension keeps its progress and results in the memory of 
 |-----------|--------|
 | `activeTab` | Access the current tab when you click the icon |
 | `tabs` | Find your Cardmarket tab, also when the popup is pinned to a separate window. The extension only looks for tabs on `www.cardmarket.com` |
-| `scripting` | Run the export, price-trend, update and want-list scripts in your Cardmarket tab |
+| `scripting` | Run the export, update and want-list scripts in your Cardmarket tab |
 | `downloads` | Pass the finished CSV to Chrome's download manager, which opens the Save As dialog |
-| `storage` | Keep the interface language and the price-trend cache in `chrome.storage.local` |
-| `host_permissions: https://www.cardmarket.com/*` | Work in tabs on `www.cardmarket.com`: load your stock, want-list and product pages there and submit the changes you confirm. No other site is covered |
+| `storage` / `unlimitedStorage` | Keep the interface language and the daily price-guide cache in `chrome.storage.local` |
+| `host_permissions: https://www.cardmarket.com/*` | Work in tabs on `www.cardmarket.com`: load your stock, want-list and product pages there and submit the changes you confirm |
+| `host_permissions: https://downloads.s3.cardmarket.com/*` | Download Cardmarket’s public daily price-guide JSON when you tick the trend option |
 
 ## Third parties
 
-The extension communicates only with `www.cardmarket.com`, the service you are already using. It contacts no third-party server.
+The extension communicates only with Cardmarket (`www.cardmarket.com` and Cardmarket’s public downloads host). It contacts no other third-party server.
 
 The popup contains ordinary links: a PayPal donation button, the extension's review page in the Chrome Web Store, lupzn.de, the developer's GitHub profile and an e-mail address. The extension sends nothing to these sites. Nothing happens unless you click a link. The site then opens in a new tab, or your mail program opens for the address, and from there that site's own privacy policy applies.
 
